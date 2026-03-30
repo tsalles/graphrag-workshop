@@ -120,3 +120,8 @@ python rag_in_memory.py query --top-k 8 "Explain the methodology"
 └── tuned_prompts/           # Custom-tuned prompts
 ```
 
+## References
+
+- [Microsoft GraphRAG — GitHub](https://github.com/microsoft/graphrag)
+- [Microsoft GraphRAG — Documentation](https://microsoft.github.io/graphrag/)
+
