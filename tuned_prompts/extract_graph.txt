@@ -1,0 +1,311 @@
+
+-Goal-
+Given a text document that is potentially relevant to this activity and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
+
+-Steps-
+1. Identify all entities. For each identified entity, extract the following information:
+- entity_name: Name of the entity, capitalized
+- entity_type: One of the following types: [framework, relation, discourse unit, model]
+- entity_description: Comprehensive description of the entity's attributes and activities
+Format each entity as ("entity"<|><entity_name><|><entity_type><|><entity_description>)
+
+2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
+For each pair of related entities, extract the following information:
+- source_entity: name of the source entity, as identified in step 1
+- target_entity: name of the target entity, as identified in step 1
+- relationship_description: explanation as to why you think the source entity and the target entity are related to each other
+- relationship_strength: an integer score between 1 to 10, indicating strength of the relationship between the source entity and target entity
+Format each relationship as ("relationship"<|><source_entity><|><target_entity><|><relationship_description><|><relationship_strength>)
+
+3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use **##** as the list delimiter.
+
+4. If you have to translate into English, just translate the descriptions, nothing else!
+
+5. When finished, output <|COMPLETE|>.
+
+-Examples-
+######################
+
+Example 1:
+
+entity_types: [framework, relation, discourse unit, model]
+text:
+5), trees (Fatehkia et al., 2024; Sarthi
+et al., 2024), and tables (Lin et al., 2025). More
+adaptive strategies dynamically select structures
+based on context (Li et al., 2025b). Despite these
+advances, most efforts emphasize surface-level as-
+sociations (e.g.,linking entities) while largely over-
+looking the rhetorical structure that governs causal
+flow, evidence presentation, and conclusion formu-
+lation. This hinders logical depth and discourse
+coherence, which our work seeks to address.
+2.2 Rhetorical Structure Theory for Text
+Generation
+Rhetorical Structure Theory (RST; (Mann and
+Thompson, 1987, 1988)) is a discourse framework
+that models hierarchical dependencies and rhetor-
+ical relations among Elementary Discourse Units
+(EDUs). It distinguishes betweennucleusandsatel-
+liteunits, connected by relations such asElabora-
+tion,Causality, andContrast, forming tree struc-
+tures that reflect communicative intent. Founda-
+tional work (Marcu, 1997, 1999; Mann and Thomp-
+son, 1987; Bhatia et al., 2015; Hayashi et al., 2016)
+has established strong correlations between rhetori-
+cal structure and human text planning (Adewoyin
+et al., 2022). Later studies have leveraged RST
+by converting trees into dependency graphs or im-
+posing structural constraints to improve coherence
+and consistency in neural generation models (Chis-
+tova, 2023; Zeldes et al., 2025; Chistova, 2024;
+Maekawa et al., 2024). More recent efforts have in-
+tegrated RST into LLMs to improve cross-sentence
+reasoning and enhance both structural integrity and
+interpretability of generated outputs (Liu et al.,
+2023; Liu and Demberg, 2024). Compared with
+shallow discourse markers or sentence-level con-
+nectives, the present work extends RST model-
+ing to the RAG setting by explicitly encoding the
+deeper structure of retrieved passages and high-
+lighting the importance of hierarchical discourse.
+3 Proposed Method
+Method Overview.We formalize the standard
+RAG as a conditional generation problem. Given
+a query q and a set of Top- k retrieved chunks
+C(q;D) ={{c 1, c2, . . . , ck}} from a corpus D, the
+output is y= arg max y′ P(y ′ |q,C(q;D)) , where
+P(·) denotes the conditional distribution of the
+generator. To overcome the limitations of the
+retrieval-and-concatenation paradigm, we propose
+Disco-RAG to augment standard RAG with rhetori-
+cal parsing and discourse-aware planning.
+As illustrated in Figure 2, our pipeline consists
+of three main stages. (1) We delve into each
+chunk ci to uncover its internal logical hierarchy
+by constructing an intra-chunk RST tree ti, (2) We
+zoom out to map the relational landscape across all
+chunks C via an inter-chunk rhetorical graphG, and
+(3) We apply a discourse-driven planning module
+that devises a blueprint B based on T=t k
+i=1 and
+Gto guide the final generation process.
+We hypothesize that under identical retriever and
+decoding conditions, explicitly injecting discourse
+knowledge improves the correctness, coherence,
+and factual consistency of generated text. Here,
+rhetorical modeling serves as aknowledge-level
+prior, while planning offersreasoning-level guid-
+ance, jointly inducing stronger structural biases
+than standard RAG. The following paragraphs pro-
+vide a detailed account of each component.
+Intra-Chunk RST Tree.For each retrieved
+chunk ci, we construct an RST tree ti using an
+LLM-based RST parser A to model local co-
+herence.1 Given ci, parser A jointly performs
+elementary discourse unit (EDU) segmentation
+and RST parsing, producing a sequence of EDUs
+{{ei1, . . . , eim}}, nucleus and satellite role assign-
+ments, and rhetorical relations among EDUs. For-
+mally, ci
+A− →t i = (V i, Ei), where Vi =
+{{ei1, . . . , eim}} is the set of EDU nodes, R is the
+set of rhetorical relations (e.g.,Elaboration,Con-
+trast, andCause), and Ei ⊆V i ×V i × R is the set
+of directed connections labeled with relation types.
+The symbol × denotes theCartesian product. The
+top-middle panel of Figure 2 shows how EDUs are
+organized into a hierarchical tree.2
+The RST tree parsing is formalized as P(t i |
+ci;θ A) = Qm
+j=1 P(e ij |c i;θ A)· Q
+(u,v) P(r u,v |
+eiu, eiv ;θ A), where P(e ij |c i) signifies the prob-
+ability of EDU boundary prediction and u, v∈V i
+are discourse units, P(r u,v |e iu, eiv ) corresponds
+to the probability of the rhetorical relation between
+two EDUs, and θA indicates the parameters of the
+parser.
+Inter-Chunk Rhetorical Graph.For all re-
+trieved chunks C, we construct a directed graph
+G= (C,F) . The edge set F ⊆ C × C ×(R ∪
+UNRELATED) encodes rhetorical relations or lack
+
+------------------------
+output:
+("entity"<|>LLAMA-3-8B-INSTRUCT<|>MODEL<|>LLaMA-3-8B-Instruct is a model fine-tuned for tasks requiring concise and document-grounded answers, trained with specific hyperparameter settings and used in downstream evaluation.)
+##
+("entity"<|>QWEN3-8B<|>MODEL<|>Qwen3-8B is a model fine-tuned similar to LLaMA-3-8B-Instruct, with multiple evaluation results to determine its performance, particularly on sensitivity to document order.)
+##
+("entity"<|>STABLE-RAG<|>FRAMEWORK<|>Stable-RAG is a retrieval-augmented generation framework employing spectral clustering on hidden states for improved reasoning robustness and reduction of noise in preference signals.)
+##
+("entity"<|>SPECTRAL CLUSTERING<|>FRAMEWORK<|>Spectral clustering groups latent reasoning modes by considering the global structure of hidden state space, using adjacency matrices and eigen-decomposition to identify clusters.)
+##
+("entity"<|>PERTURBATION SUCCESS RATE (PSR)<|>RELATION<|>Perturbation Success Rate measures the proportion of document-order perturbations that cause hallucination outputs in machine learning models across sampled test instances.)
+##
+("entity"<|>SIMILARITY GRAPH<|>RELATION<|>A graph that encodes pairwise similarities between hidden states, constructed using weighted edges and informing clustering within the spectral clustering framework.)
+##
+("entity"<|>ADJACENCY MATRIX<|>DISCOURSE UNIT<|>The adjacency matrix represents pairwise similarities in the similarity graph, calculated from cosine distances and exponential functions.)
+##
+("entity"<|>NORMALIZED GRAPH LAPLACIAN<|>DISCOURSE UNIT<|>This is a matrix derived from the adjacency matrix, often used in spectral clustering to determine the eigenvalues and latent clusters of hidden states.)
+##
+("entity"<|>EIGENGAP<|>DISCOURSE UNIT<|>A metric used in spectral clustering to determine the optimal number of clusters, based on the gaps between eigenvalues of the normalized Laplacian matrix.)
+##
+("relationship"<|>LLAMA-3-8B-INSTRUCT<|>STABLE-RAG<|>LLaMA-3-8B-Instruct is used within the Stable-RAG framework, leveraging its retrieval-augmented generation capabilities for robust evaluation.<|>8)
+##
+("relationship"<|>QWEN3-8B<|>STABLE-RAG<|>Qwen3-8B is evaluated within the Stable-RAG framework for its sensitivity to document order and perturbation success.<|>8)
+##
+("relationship"<|>STABLE-RAG<|>SPECTRAL CLUSTERING<|>Stable-RAG utilizes spectral clustering to group similar reasoning modes and reduce noise in preference signals.<|>9)
+##
+("relationship"<|>SPECTRAL CLUSTERING<|>SIMILARITY GRAPH<|>Spectral clustering applies similarity graphs to encode relationships between hidden states and guide cluster formation.<|>7)
+##
+("relationship"<|>SIMILARITY GRAPH<|>ADJACENCY MATRIX<|>The adjacency matrix is derived from the similarity graph and is critical for determining how hidden states relate to each other in spectral clustering.<|>7)
+##
+("relationship"<|>ADJACENCY MATRIX<|>NORMALIZED GRAPH LAPLACIAN<|>The normalized graph Laplacian is calculated from the adjacency matrix and used in spectral clustering.<|>8)
+##
+("relationship"<|>NORMALIZED GRAPH LAPLACIAN<|>EIGENGAP<|>Eigengap analysis identifies the number of clusters by examining the eigenvalues of the normalized graph Laplacian.<|>9)
+##
+("relationship"<|>QWEN3-8B<|>PERTURBATION SUCCESS RATE (PSR)<|>Qwen3-8B is evaluated for document-order sensitivity using perturbation success rate metrics.<|>8)
+##
+("relationship"<|>SIMILARITY GRAPH<|>PERTURBATION SUCCESS RATE (PSR)<|>The similarity graph informs reasoning consistency and impacts metrics like the perturbation success rate in document-order sensitivity evaluations.<|>6)
+<|COMPLETE|>
+#############################
+
+
+Example 2:
+
+entity_types: [framework, relation, discourse unit, model]
+text:
+owerment”: {{“Winner”: “Answer 1 (TagRAG)”, “Explanation”: “Answer 1 empowers the reader by
+thoroughly explaining each technique’s use, advantages, and practical scenarios. It also provides valuable
+insights on how the selection method should align with the problem at hand, giving readers the tools to make
+informed decisions based on their specific context.”}},
+“Overall Winner”: {{“Winner”: “Answer 1 (TagRAG)”, “Explanation”: “Although Answer 2 is more direct,
+Answer 1 provides a more comprehensive, diverse, and empowering response that thoroughly covers the topic,
+making it the overall winner. It offers in-depth explanations, a variety of methods, and detailed guidance, which
+would better equip the reader to understand and apply feature selection techniques in different scenarios.”}}
+Table 14: Case study: evaluation of TagTAG v.s. MiniRAG with Qwen3-4B
+18
+Prompt of question generation
+Given the following description of a dataset: {{total_description}}. Please identify 5 potential users who would engage
+with this dataset. For each user, list 5 tasks they would perform with this dataset. Then, for each (user, task) combination,
+generate 5 questions that require a high-level understanding of the entire dataset. Output the results in the following
+structure:
+- User 1: [user description]
+- Task 1: [task description]
+- Question 1:
+...
+- Question 5:
+...
+- Task 5: [task description]
+...
+- User 5: [user description]
+...
+Prompt of evaluation
+—Role—
+You are an expert tasked with evaluating two answers to the same question based on three criteria: **Comprehensive-
+ness**, **Diversity**, **Empowerment**, and **Directness**.
+You will evaluate two answers to the same question based on three criteria: **Comprehensiveness**, **Diversity**,
+and **Empowerment**.
+- **Comprehensiveness**: How much detail does the answer provide to cover all aspects and details of the question?
+- **Diversity**: How varied and rich is the answer in providing different perspectives and insights on the question?
+- **Empowerment**: How well does the answer help the reader understand and make informed judgments about the
+topic?
+For each criterion, choose the better answer (either Answer 1 or Answer 2) and explain why. Then, select an overall
+winner based on these three categories.
+Here is the question: {{query}}
+Here are the two answers:
+**Answer 1:** {{answer1}}
+**Answer 2:** {{answer2}}
+Evaluate both answers using the three criteria listed above and provide detailed explanations for each criterion. Output
+your evaluation in the following JSON format:
+{{“Comprehensiveness”: {{“Winner”: “[Answer 1 or Answer 2]”, “Explanation”: “[Provide explanation here]”}},
+“Diversity”: {{“Winner”: “[Answer 1 or Answer 2]”, “Explanation”: “[Provide explanation here]”}},
+“Empowerment”: {{“Winner”: “[Answer 1 or Answer 2]”, “Explanation”: “[Provide explanation here]”}},
+“Overall Winner”: {{“Winner”: “[Answer 1 or Answer 2]”, “Explanation”: “[Summarize why this answer is the overall
+winner based on the three criteria]”}}}}
+19
+Prompt of object tag keyword extraction
+—Goal—
+Given a domain-specific text document and a list of keyword types, summarize keywords from the text and generate
+their relationships. Use {{language}} as output language.
+—Steps—
+1. Summarize keywords from the text. For each summarized keyword, generate the following information:
+- keyword_name: Name of the keyword, use same language as input text. If English, capitalized the name.
+- keyword_type: Type of the keyword that can classify the keyword.
+- keyword_description: Comprehensive description of the keyword’s attributes and activities
+Format each keyword as (“keyword”{{tuple_delimiter}}< keyword_name >{{tuple_delimiter}}< keyword_type >
+{{tuple_delimiter}}< keyword_description >)
+2. From the keywords summarized in step 1, generate all pairs of (source_keyword, target_keyword) that are *clearly
+related* to each other.
+Don’t create source_keyword or target_keyword that are not summarized in step 1.
+For each pair of related keywords, generate the following information:
+- source_keyword: name of the source keyword, as summarized in step 1
+- target_keyword: name of the target keyword, as summarized in step 1
+- relationship_description: explanation as to why you think the source keyword and the target keyword are related to
+each other
+Format each relationship as (“relationship”{{tuple_delimiter}}< source_keyword >{{tuple_delimiter}}
+< target_keyword >{{tuple_delimiter}}< relationship_description >)
+3. Return output in {{language}} as a single list of all the keywords and relationships generated in steps 1 and 2. Use
+**{{record_delimiter}}** as the list delimiter.
+4. When finished, output {{completion_delimiter}}
+—Examples—
+{{examples}}
+—Real Data—
+Text: {{input_text}}
+Output:
+Prompt of domain tag chain organization
+—Goal—
+Given a domain tag with its description and an object tag with its description, generate the relationship chain between
+them.
+Use {{language}} as output language.
+—Steps—
+1. Generate the relationship chain between the domain tag and the object tag. Present all domain tags consisting of the
+following information:
+- domain_name: Name of the domain, use same language as input text. If English, capitalized the name.
+- domain_description: Comprehensive description of the domain tag.
+Format each domain tag as < domain_name > {{explanation_delimiter}}<
+------------------------
+output:
+("entity"<|>LLAMA-3-8B-INSTRUCT<|>MODEL<|>LLaMA-3-8B-Instruct is a fine-tuned language model trained for a single epoch on NVIDIA RTX PRO 6000 GPUs, used for downstream evaluation tasks.)
+##
+("entity"<|>QWEN3-8B<|>MODEL<|>Qwen3-8B is a fine-tuned language model trained for two epochs on NVIDIA RTX PRO 6000 GPUs, used for tasks such as retrieval-augmented generation and response generation.)
+##
+("entity"<|>STABLE-RAG<|>FRAMEWORK<|>Stable-RAG employs spectral clustering on hidden states to group reasoning behaviors, improving consistency during retrieval-augmented generation tasks.)
+##
+("entity"<|>SPECTRAL CLUSTERING<|>RELATION<|>Spectral clustering is a method applied to hidden states to identify global reasoning modes and reduce noise, enabling Stable-RAG to enhance consistency.)
+##
+("entity"<|>QWEN3 SERIES<|>MODEL<|>A series of Qwen3 models, including Qwen3-1.7B, Qwen3-4B, Qwen3-8B, and Qwen3-14B, evaluated for perturbation sensitivity and document-order effects.)
+##
+("entity"<|>PERTURBATION SUCCESS RATE (PSR)<|>RELATION<|>Perturbation Success Rate measures the impact of document-order sensitivity by calculating the success ratio of producing hallucinated outputs under random permutations.)
+##
+("entity"<|>DOCUMENT-ORDER SENSITIVITY<|>RELATION<|>Document-order sensitivity refers to the sensitivity of retrieval-augmented generation models to the order of input documents, potentially leading to inconsistent outputs.)
+##
+("relationship"<|>LLAMA-3-8B-INSTRUCT<|>QWEN3-8B<|>Both models are fine-tuned using RTX PRO 6000 GPUs for retrieval-augmented generation tasks, but differ in their training epochs and model-specific optimization.<|>7)
+##
+("relationship"<|>STABLE-RAG<|>SPECTRAL CLUSTERING<|>Stable-RAG integrates spectral clustering to classify reasoning modes and improve consistency in its framework.<|>9)
+##
+("relationship"<|>STABLE-RAG<|>DOCUMENT-ORDER SENSITIVITY<|>Stable-RAG addresses document-order sensitivity by leveraging spectral clustering and grouping reasoning modes for enhanced robustness.<|>8)
+##
+("relationship"<|>SPECTRAL CLUSTERING<|>PERTURBATION SUCCESS RATE (PSR)<|>Spectral clustering supports reducing PSR by organizing hidden states to mitigate hallucination from input order variations.<|>6)
+##
+("relationship"<|>DOCUMENT-ORDER SENSITIVITY<|>PERTURBATION SUCCESS RATE (PSR)<|>Document-order sensitivity directly affects PSR scores, as demonstrated by randomized document perturbations leading to hallucinated outputs.<|>9)
+##
+("relationship"<|>QWEN3 SERIES<|>DOCUMENT-ORDER SENSITIVITY<|>The Qwen3 series exhibits varied document-order sensitivity, impacting their Perturbation Success Rate (PSR) across different configurations.<|>7)
+##
+("relationship"<|>QWEN3 SERIES<|>PERTURBATION SUCCESS RATE (PSR)<|>The Qwen3 models are compared based on PSR to evaluate their robustness against document-order perturbations.<|>8)
+##
+("relationship"<|>LLAMA-3-8B-INSTRUCT<|>STABLE-RAG<|>LLaMA-3-8B-Instruct is a model compatible with retrieval-augmented frameworks like Stable-RAG, focusing on improving generation accuracy and consistency.<|>6)
+##
+("relationship"<|>QWEN3-8B<|>STABLE-RAG<|>Qwen3-8B integrates with Stable-RAG frameworks for document retrieval and generation, benefiting from spectral clustering-based enhancements.<|>7)
+<|COMPLETE|>
+#############################
+
+
+
+-Real Data-
+######################
+entity_types: [framework, relation, discourse unit, model]
+text: {input_text}
+######################
+output:

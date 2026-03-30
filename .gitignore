@@ -1,0 +1,48 @@
+# ---------- Secrets & credentials ----------
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+
+# ---------- GraphRAG artefacts ----------
+cache/
+books_root/cache/
+output/
+books_root/output/
+logs/
+books_root/logs/
+
+# ---------- Vector stores ----------
+lancedb/
+.rag_store/
+
+# ---------- PDFs (large binary files) ----------
+pdfs/
+
+# ---------- IDE / editor ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- OS ----------
+Thumbs.db
+Desktop.ini
+.DS_Store

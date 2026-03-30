@@ -1,0 +1,10 @@
+azure-identity
+graphrag
+
+openai
+
+faiss-cpu
+numpy
+
+fastmcp
+pypdf

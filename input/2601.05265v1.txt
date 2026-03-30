@@ -1,0 +1,701 @@
+Cross-Document Topic-Aligned Chunking for Retrieval-Augmented
+Generation
+Mile Stankovic
+milestankovicposao@gmail.com
+January 12, 2026
+Abstract
+Chunking quality determines RAG system performance. Current methods partition doc-
+uments individually, but complex queries need information scattered across multiple sources:
+the knowledge fragmentation problem. We introduce Cross-Document Topic-Aligned (CDTA)
+chunking, which reconstructs knowledge at the corpus level. First identifies topics across docu-
+ments, maps segments to each topic, and synthesizes them into unified chunks.
+On HotpotQA multi-hop reasoning, our method reached 0.93 faithfulness versus 0.83 for
+contextual retrieval and 0.78 for semantic chunking, a 12% improvement over current industry
+best practice (p <0.05). On UAE Legal texts, it reached 0.94 faithfulness with 0.93 citation
+accuracy. Atk= 3, maintains 0.91 faithfulness while semantic methods drop to 0.68, a single
+CDTA chunk contains information requiring multiple traditional fragments.
+Indexing costs are higher but synthesis produces information-dense chunks that reduce query-
+time retrieval needs. For high-query-volume applications with distributed knowledge, cross-
+document synthesis improves measurably over within-document optimization.
+1 Introduction
+1.1 RAG Systems and Their Limitations
+Large language models transformed natural language processing but face knowledge cutoffs and
+hallucination risks. RAG systems address this by grounding answers in retrieved documents [Lewis
+et al., 2020]. The standard pipeline has three stages: chunking and vectorizing a corpus, retrieving
+relevant passages using dense semantic retrieval [Karpukhin et al., 2020], and augmenting generation
+with retrieved context.
+However, standard RAG faces retrieval quality challenges, low precision and recall prevent LLMs
+from obtaining sufficient context [Gao et al., 2023]. Expanding context windows to millions of tokens
+is progress [Liu et al., 2023], but the core problem remains: poorly structured information harms
+performance regardless of window size. Optimizing signal-to-noise ratio is the real challenge.
+1.2 The Scattered Knowledge Problem
+Poor chunking caps quality and degrades faithfulness [Gao et al., 2023]. When queries require syn-
+thesizing facts from multiple documents, traditional methods retrieve many fragments, each con-
+taining relevant information (signal) embedded in document-specific context (noise). As retrieved
+chunks increase to capture necessary information, noise accumulates.
+1
+arXiv:2601.05265v1  [cs.IR]  8 Nov 2025
+Current methods, from fixed-size splitting to semantic approaches using sentence embeddings
+[Reimers and Gurevych, 2019], treat chunking as document-level partitioning. Even advanced meth-
+ods like late chunking, which embeds entire documents before creating chunk vectors [G¨ unther et al.,
+2024], operate within document boundaries. Methods that build hierarchical summaries within doc-
+uments [Sarthi et al., 2024] cannot solve problems when facts scatter across separate sources.
+Complex topics rarely live in one document. They fragment across sources, creating the knowl-
+edge fragmentation challenge, a manifestation of the long-standing “knowledge soup” challenge,
+where information exists as internally consistent but externally distributed chunks [Sowa, 2006].
+This particularly affects queries requiring information synthesis across multiple text segments [Zhao
+et al., 2024].
+Consider two examples:
+Multi-Jurisdictional Legal Compliance.Financial institutions determining data retention
+requirements need information spanning foundational laws, amendments, federal guidance, and
+court rulings [Chalkidis and Kampas, 2019, Henderson et al., 2022]. No single document contains
+the complete answer. Traditional chunking returns disconnected passages, forcing synthesis at query
+time, complex and error-prone.
+Clinical Treatment Protocol Knowledge.Physicians querying treatment protocols for
+patients with comorbidities require answers spanning primary guidelines, specialty research, FDA
+communications, and formulary restrictions. Retrieving only primary guideline fragments risks
+unsafe decisions.
+Knowledge in these domains distributes through independently produced documents, each co-
+herent but incomplete. Operating within document boundaries breaks topic structures. Multi-hop
+reasoning datasets like HotpotQA [Yang et al., 2018] explicitly require combining facts from multiple
+sources.
+1.3 Our Approach
+We introduce CDTA chunking, which reframes chunking from document partitioning to corpus-level
+knowledge reconstruction. Rather than seeking better split points, we identify global topics and
+synthesize relevant information into comprehensive units. We address three questions:
+•RQ1:Can cross-document synthesis produce more complete knowledge units than traditional
+chunking?
+•RQ2:Do these units improve RAG performance in multi-document reasoning?
+•RQ3:What trade-offs exist between indexing-time synthesis and query performance?
+This paper contributes a framework for cross-document knowledge synthesis through corpus-
+wide topic identification and LLM-driven reconstruction, experimental validation across multi-hop
+reasoning and domain-specific tasks, and analysis of trade-offs identifying where the methodology
+delivers value.
+2 Related Work
+Chunking methods evolved from simple partitioning to sophisticated semantic approaches, yet all
+share a fundamental limitation: intra-document scope. We found no prior work that synthesizes
+chunks across documents to unify topics in RAG.
+2
+2.1 Traditional Partitioning
+Fixed-Size Chunkingpartitions text into predetermined length segments (e.g., 512 tokens), often
+with overlaps. Benefits include simplicity and efficiency. However, uniform treatment arbitrarily
+splits sentences, paragraphs, and concepts, creating contextually deficient chunks that degrade
+retrieval accuracy.
+Recursive Chunkingimproves on fixed-size splitting by hierarchically splitting along structural
+markers (paragraphs, then sentences) to align with document organization. Effectiveness depends on
+consistent formatting and remains restricted to explicit structure. It cannot synthesize information
+across boundaries or consolidate topics spanning documents.
+Semantic Chunkinggroups adjacent sentences with high semantic similarity, measured by em-
+bedding cosine distance [Reimers and Gurevych, 2019]. This creates thematically cohesive chunks by
+splitting at topical shifts. However, semantic chunking prioritizes nearby sentences but misses top-
+ics elsewhere. High similarity between adjacent sentences does not ensure complete topic capture,
+especially if relevant details appear in non-contiguous sections.
+2.2 Contextual Chunk Augmentation
+Anthropic introduced contextual retrieval in industry engineering documentation [Anthropic, 2024],
+enriching chunks by prepending LLM-generated context summaries before embedding. The tech-
+nique generates brief context for each chunk, typically 50-100 tokens explaining the chunk’s role
+within its source document. Before embedding, each chunk receives a header like “This section
+discusses X in the context of document Y about Z.” Published implementations from AWS and
+other engineering teams report 5-15% gains in retrieval precision across diverse datasets.
+Contextual retrieval preserves within-document context. By providing document-level context
+to each chunk, embeddings better capture the chunk’s semantic position relative to its source. This
+improves retrieval when multiple chunks discuss similar concepts but in different document contexts.
+However, contextual augmentation operates within document boundaries. It cannot synthe-
+size information scattered across separate sources. When information about a topic distributes
+across multiple independently-authored documents, contextual retrieval still returns disconnected
+fragments, now with added document context, but still incomplete.
+These approaches solve different problems. Contextual retrieval optimizes within-document
+representation. CDTA handles cross-document knowledge reconstruction. Given that contextual
+retrieval now serves as industry best practice for RAG chunking, actively deployed in production
+systems and recommended by leading AI companies, we include it as a baseline to validate against
+real-world state-of-the-art, not just academic methods. These techniques could be combined: using
+CDTA to unify distributed information across documents, then applying contextual augmentation
+to preserve document-specific context within each synthesized chunk.
+2.3 Advanced Intra-Document Methods
+Late Chunking[G¨ unther et al., 2024] produces contextually-aware embeddings by first encoding
+entire documents through transformer attention, then deriving chunk vectors through mean pool-
+ing. This preserves rich intra-document context. Late chunking achieves strong performance when
+answers reside within single documents, but fundamentally cannot capture relationships across doc-
+uments never processed together. While excellent for preserving document-level context, it operates
+within document boundaries and cannot handle cross-document synthesis, the problem we tackle.
+These approaches are complementary: late chunking optimizes within-document context, while
+CDTA handles cross-document synthesis.
+3
+RAPTOR[Sarthi et al., 2024] builds hierarchical tree structures of text summaries using re-
+cursive clustering within documents. Lower levels contain fine-grained segments while higher levels
+contain broader summaries. At query time, RAPTOR retrieves from multiple abstraction levels
+simultaneously. By capturing multi-scale representations, it addresses limitations of flat chunks.
+However, RAPTOR’s tree construction remains bounded by document scope, creating hierarchies
+within individual documents, not across them.
+2.4 Multi-Document Summarization
+Prior research in multi-document summarization [Xu and Lapata, 2020] operates at query time with
+explicit document sets and user-specified topics. Out approach differs by performing corpus-wide
+synthesis at indexing time, automatically discovering topics through unsupervised extraction, and
+creating a persistent, query-independent knowledge base designed for retrieval rather than direct
+consumption.
+2.5 Advanced RAG Methods
+Recent work explores improving RAG through self-reflection and corrective mechanisms. Self-
+RAG [Asai et al., 2024] enables models to critique their own outputs and decide when to retrieve
+additional context. ARES [Saad-Falcon et al., 2023] provides automated evaluation frameworks
+for RAG systems. Corrective RAG [Yan et al., 2024] refines retrieval through iterative feedback
+loops. While these approaches enhance query-time processing, they operate on whatever chunks
+the indexing system provides. CDTA complements these methods by improving the fundamental
+quality of indexed knowledge units.
+3 The CDTA Methodology
+3.1 Design Principles
+CDTA builds on three core principles:
+Cross-Document Knowledge Reconstruction.Rather than preserving document boundaries, we
+identify global topics and consolidates all relevant information from across the corpus. This directly
+tackles the problem where no single document contains complete coverage.
+Semantic Topic Discovery.Topics emerge through semantic analysis of document content rather
+than imposed taxonomies. The methodology extracts conceptual themes from the corpus itself,
+ensuring topic definitions align with how knowledge actually appears in text.
+LLM-Driven Synthesis.Rather than simple concatenation or extraction, CDTA employs lan-
+guage models to perform knowledge synthesis, reconstructing information into coherent narratives
+that preserve fidelity to sources while eliminating redundancy and resolving conflicts. The resulting
+chunks are inherently optimized for LLM comprehension through narrative coherence and explicit
+topic mapping, properties that improve both generation quality and model reliability compared to
+traditional fragmented retrieval.
+3.2 The Six-Stage Pipeline
+CDTA transforms raw documents into synthesized chunks through six stages.
+4
+3.2.1 Stage 1: Document Segmentation
+We partition documents into semantically meaningful segments. We use paragraph-level segmenta-
+tion as default, which naturally aligns with authorial intent and topical organization. For documents
+without clear paragraph markers, we fall back to sentence-boundary splitting. Each segment receives
+a unique identifier linking it to its source document.
+Paragraph-level segmentation balances completeness and efficiency: segments are large enough
+to contain complete thoughts yet small enough for efficient LLM processing. We use segments
+averaging 150 tokens based on initial testing across benchmarks.
+3.2.2 Stage 2: Topic Extraction
+Each document segment is processed independently through an LLM prompt designed to identify
+high-level conceptual topics (see Appendix 8 for complete prompt).
+We use GPT-4o with temperature 0.3 to balance consistency with varied topic identification. The
+model extracts conceptual themes (not keywords) and returns structured JSON output containing
+topic names and brief descriptions.
+This stage produces a large, potentially redundant set of topic-segment pairs:T raw ={(t i, sj)}
+wheret i is a topic identified from segments j.
+3.2.3 Stage 3A: Topic Deduplication
+The raw topic set contains substantial semantic redundancy, multiple segments may identify the
+same underlying concept using different phrasing. For instance, “Data Privacy Regulations” and
+“Privacy Law Compliance” often refer to the same topic. We perform topic deduplication through
+hierarchical clustering of topic embeddings (using OpenAI’s text-embedding-3-large model) with a
+similarity threshold of 0.85, chosen empirically to balance topic consolidation (higher threshold) with
+preserving distinct concepts (lower threshold). This value was validated through manual inspection
+of merged topics on a development set.
+Process:
+1. Embed all raw topic descriptions
+2. Perform hierarchical clustering using average linkage
+3. Merge clusters exceeding the similarity threshold
+4. Generate canonical names and descriptions for merged clusters using an LLM
+Output: Consolidated set of unique topicsT={t 1, t2, . . . , tn}where|T| ≪ |T raw|.
+3.2.4 Stage 3B: Relevance Mapping
+After consolidating topics, we determine which segments are relevant to each. This filtering step
+prevents noise accumulation.
+For each topict i inTand each segments j in the corpus, we invoke an LLM (GPT-4o-mini,
+temperature 0.0) to make a binary relevance judgment (see Appendix 8). The prompt provides the
+topic name, description, and segment text, asking: “Does this segment contain information directly
+and substantively relevant to the topic?”
+This stage requiresO(|T| × |S|) LLM calls, where|T|is the number of topics and|S|is the total
+number of segments. While computationally intensive, it ensures high precision. For our largest
+corpus (UAE Legal: 847 documents, 4,200 segments, 180 topics), this required approximately
+756,000 API calls completed in 6.3 hours using parallel processing with rate limiting.
+Output: Relevance matrixRwhereR ij = 1 if segments j is relevant to topict i, and 0 otherwise.
+5
+3.2.5 Stage 4: Segment Aggregation
+Using the relevance matrix, we aggregate all segments judged relevant to each topic:A i ={s j :
+Rij = 1}. This produces topic-specific collections of text fragments that may originate from any
+document in the corpus.
+3.2.6 Stage 5: Knowledge Synthesis
+The aggregated segments for each topic are passed to a powerful language model (Claude 3.5 Sonnet,
+temperature 0.7) tasked with synthesizing them into a single, coherent document (see Appendix 8
+for complete prompt).
+The model receives instructions to:
+•Include all relevant information from source segments (comprehensiveness)
+•Structure information into a logical, flowing narrative (coherence)
+•Maintain strict fidelity to source material without adding external knowledge
+•Eliminate redundancy across segments
+•Note contradictions if sources conflict
+Output: For each topict i, a synthesized knowledge documentDi capturing complete information
+about that topic as extracted from the corpus.
+3.2.7 Stage 6: Indexing and Embedding
+The synthesized topic documents are embedded using the same embedding model used for retrieval
+(OpenAI text-embedding-3-large). If a synthesized document exceeds 1000 tokens (chosen to match
+typical RAG chunk sizes and optimize for embedding model performance characteristics), it is split
+using semantic chunking to create multiple chunks that maintain topic coherence.
+Each final chunk maintains metadata linking it back to the topic it represents, the original source
+documents that contributed to its synthesis, and confidence scores from the relevance mapping stage.
+This metadata enables downstream citation and traceability.
+3.3 Trade-offs
+Indexing Cost vs. Query Quality.CDTA invests heavily in indexing to produce superior
+retrieval quality. This follows the “pay once, benefit many times” principle: the indexing cost is
+amortized over potentially millions of queries.
+Model Selection.We use different models at different stages based on task requirements:
+deterministic relevance checking (GPT-4o-mini at temperature 0), creative topic extraction (GPT-
+4o at temperature 0.3), and high-quality synthesis (Claude 3.5 Sonnet at temperature 0.7). This
+tiered approach balances quality and cost.
+Topic Granularity.Our paragraph-based segmentation and topic extraction approach favors
+moderately broad topics. Extremely fine-grained topics would reduce synthesis benefits, while overly
+broad topics would create unwieldy chunks.
+4 Experimental Setup
+4.1 Datasets
+We evaluated CDTA on two benchmarks representing different retrieval scenarios:
+6
+HotpotQA[Yang et al., 2018]: A multi-hop reasoning dataset containing 5,901 questions requir-
+ing information synthesis from two or more Wikipedia articles. Each question includes supporting
+facts from multiple documents. This dataset directly tests our methods core value, handling queries
+where answers are inherently distributed. While Wikipedia articles are more structured than many
+real-world documents, HotpotQA remains the standard benchmark for multi-hop reasoning.
+UAE Legal Corpus: A domain-specific dataset of 847 legal documents covering UAE federal
+law, DIFC regulations, and regulatory guidance, with 312 expert-written queries about compliance
+and legal interpretation. Query complexity: 45% require 2-3 document synthesis, 35% require 4+
+documents, 20% single document. Three legal experts created queries with high inter-annotator
+agreement (Fleiss’κ= 0.78). This tests in a real-world specialized domain with high information
+fragmentation.
+4.2 Baselines
+We compared CDTA against four chunking methods spanning simple to state-of-the-art approaches:
+•Fixed-Size:512-token chunks with 50-token overlap
+•Recursive:Hierarchical splitting at paragraph and sentence boundaries
+•Semantic:Sentence-based chunking using embedding similarity (threshold 0.8)
+•Contextual:Semantic chunking with LLM-generated context prepended to each chunk be-
+fore embedding (following Anthropic’s methodology [Anthropic, 2024])
+All methods used identical embedding models (OpenAI text-embedding-3-large) and retrieval
+settings for fair comparison. For Contextual, we used GPT-4o-mini to generate 50-100 token context
+summaries for each chunk, prepended before embedding.
+4.3 Implementation Details
+Our implementation used:
+•Topic Extraction:GPT-4o with temperature 0.3
+•Relevance Mapping:GPT-4o-mini with temperature 0.0
+•Synthesis:Claude 3.5 Sonnet with temperature 0.7
+•Contextual Augmentation:GPT-4o-mini with temperature 0.0
+•Embeddings:OpenAI text-embedding-3-large (1536 dimensions)
+•Retrieval:Top-k= 5 with cosine similarity
+•Random Seed:42 for reproducible sampling
+Segmentation was paragraph-based, producing segments averaging 150 tokens.
+4.4 Evaluation Metrics
+We adopted a multi-framework evaluation strategy combining automated and domain-specific met-
+rics.
+4.4.1 RAGAS Framework
+We used the automated RAGAS framework [Es et al., 2024] designed to assess RAG pipeline quality:
+Faithfulness:The primary metric, measuring factual consistency of generated answers with
+retrieved context. Computed as the proportion of claims in the generated answer that can be
+verified against retrieved chunks.
+7
+Answer Relevancy:Semantic similarity between the generated answer and the original query.
+Context Precision:Proportion of retrieved chunks containing query-relevant information.
+High precision indicates minimal irrelevant information diluting relevant facts.
+Context Recall:Percentage of information required to answer the query that appears in
+retrieved chunks. Recall below 100% indicates missing information.
+4.4.2 Retrieval Metrics
+Mean Reciprocal Rank (MRR):Measures the average reciprocal rank of the first relevant
+chunk. Higher MRR indicates better ranking quality. Computed as:M RR= 1
+|Q|
+P|Q|
+i=1
+1
+ranki
+Hit Rate@k:Binary metric measuring whether any relevant chunk appears in top-k results.
+We report Hit Rate@1 and Hit Rate@3.
+4.4.3 Domain-Specific Metrics
+Citation Accuracy (UAE Legal only):For legal domain, we manually evaluated whether cited
+sources were accurate and complete. Three annotators evaluated a random sample of 100 responses
+with high inter-annotator agreement (Fleiss’κ= 0.82).
+4.4.4 Statistical Testing
+We used paired t-tests to assess significance of performance differences, with ap <0.05 threshold.
+Results averaged over 3 runs.
+5 Results
+5.1 Main Results
+Table 1: Performance on HotpotQA (Multi-Hop Reasoning). CDTA beats all baselines across
+metrics. Contextual improves over Semantic but cannot solve cross-document synthesis. Results
+averaged over 3 runs, all improvements statistically significant (p <0.05).
+Method Faithfulness Ans. Rel. Context Recall Context Prec. MRR Hit@1
+Fixed-Size 0.64 0.66 0.72 0.58 0.51 0.42
+Recursive 0.71 0.75 0.78 0.66 0.58 0.51
+Semantic 0.78 0.82 0.82 0.73 0.64 0.56
+Contextual 0.83 0.86 0.86 0.78 0.69 0.63
+CDTA 0.93 0.90 0.97 0.89 0.86 0.88
+CDTA reached 0.93 faithfulness on HotpotQA [Yang et al., 2018], beating Contextual by 12%,
+Semantic by 19%, Recursive by 31%, and Fixed-Size by 45% (allp <0.05). Context recall of
+0.97 shows CDTA retrieves nearly complete information, versus 0.86 for Contextual and 0.82 for
+Semantic. Context precision of 0.89 indicates CDTA retrieves predominantly relevant information
+with minimal noise, establishing high signal-to-noise ratio that enables accurate answer generation.
+Contextual augmentation improved over Semantic chunking by 6% (0.83 vs 0.78 faithfulness),
+validating the utility of document-level context in embeddings. However, this improvement pales
+8
+compared to CDTA’s 19% gain over Semantic. The pattern is clear: within-document context helps,
+but cross-document synthesis is what multi-hop reasoning demands.
+For ranking quality, CDTA achieved 0.86 MRR, meaning relevant chunks typically appear at
+rank 1.16, compared to rank 1.45 for Contextual and 1.56 for Semantic. Hit Rate@1 of 0.88 means
+88% of queries find a relevant chunk in the very first result, versus 63% for Contextual and 56% for
+Semantic.
+Figure 1: Multi-metric comparison on HotpotQA. CDTA (blue, outer) versus Fixed-Size baseline
+(red, inner) shows superior performance across all dimensions: Faithfulness (0.93 vs 0.64), Hit
+Rate@1 (0.88 vs 0.42), Answer Relevancy (0.90 vs 0.66), Context Recall (0.97 vs 0.72), and Context
+Precision (0.89 vs 0.58).
+On domain-specific legal documents, CDTA reached 0.94 faithfulness and 0.93 citation accuracy,
+an 18% improvement over Contextual, 27% over Semantic, 40% over Recursive, and 62% over Fixed-
+Size (allp <0.05). Context recall of 0.98 approaches perfect retrieval of necessary information,
+combined with 0.91 context precision.
+Contextual improved over Semantic by 8% in this domain (0.80 vs 0.74), a larger gain than
+on HotpotQA, likely because legal documents have richer document-level structure that context
+summaries can capture. However, even with this advantage, Contextual still lags CDTA by 18%,
+showing that document context cannot substitute for cross-document synthesis in domains where
+information systematically distributes across multiple authoritative sources.
+Figure 1 illustrates CDTA’s advantages across all evaluation dimensions relative to traditional
+fixed-size chunking.
+9
+Table 2: Performance on UAE Legal dataset. CDTA outperforms all baselines across metrics.
+Contextual improves over Semantic but still fragments information. Results averaged over 3 runs
+(p <0.05).
+Method Faithfulness Context Recall Context Precision Citation Accuracy
+Fixed-Size 0.58 0.68 0.53 0.52
+Recursive 0.67 0.74 0.62 0.61
+Semantic 0.74 0.79 0.71 0.68
+Contextual 0.80 0.84 0.76 0.74
+CDTA 0.94 0.98 0.91 0.93
+5.2 Retrieval Efficiency at Low k
+A key advantage emerges when examining performance under retrieval constraints. We analyzed
+faithfulness atk= 3 (retrieving only 3 chunks) versus standardk= 5:
+Table 3: Faithfulness atk= 3 vsk= 5 on HotpotQA. CDTA maintains high performance with
+fewer chunks, showing information density advantages. Results averaged over 3 runs (p <0.05).
+Method k=3 k=5 Degradation
+Fixed-Size 0.51 0.64 -20%
+Recursive 0.59 0.71 -17%
+Semantic 0.68 0.78 -13%
+Contextual 0.74 0.83 -11%
+CDTA 0.91 0.93 -2%
+CDTA suffers only 2% faithfulness degradation when reducingkfrom 5 to 3, compared to 11%
+for Contextual, 13% for Semantic, 17% for Recursive, and 20% for Fixed-Size. This resilience stems
+from producing information-dense chunks where a single retrieved unit contains comprehensive
+topic coverage. Contextual performs better than Semantic here (11% vs 13% degradation) because
+document context helps identify the most relevant chunks, but still requires retrieving multiple
+fragments to assemble complete information.
+Figure 2 shows CDTA’s remarkable resilience at lowkvalues, maintaining high faithfulness even
+when retrieving minimal context. Contextual shows modest improvement over Semantic at allk
+values, but both require substantially largerkto approach CDTA’s performance.
+CDTA achieves 0.88 Hit Rate@1, 88% of queries find a relevant chunk in the very first result,
+compared to 0.63 for Contextual, 0.56 for Semantic, 0.51 for Recursive, and 0.42 for Fixed-Size. At
+k= 3, CDTA reaches 0.96, ensuring relevant information appears in the top three results for nearly
+all queries. Contextual’s Hit Rate@1 of 0.63 beats Semantic’s 0.56, confirming that document
+context improves retrieval ranking. However, this 7-point gain is dwarfed by CDTA’s 32-point
+advantage over Semantic (0.88 vs 0.56).
+5.3 Query-Type Analysis
+Analyzing HotpotQA results by question type revealed differential performance patterns:
+10
+Figure 2: Faithfulness on HotpotQA askincreases from 1 to 10. CDTA maintains consistently
+high performance (0.90-0.93) across allkvalues, while traditional methods require more chunks to
+achieve competitive results. Error bands represent standard deviation across 3 runs.
+Table 4: Hit Rate@k on HotpotQA. CDTA achieves higher rates of relevant chunk retrieval in top
+positions. Results averaged over 3 runs (p <0.05).
+Method Hit Rate@1 Hit Rate@3
+Fixed-Size 0.42 0.68
+Recursive 0.51 0.76
+Semantic 0.56 0.79
+Contextual 0.63 0.84
+CDTA 0.88 0.96
+Table 5: Faithfulness on HotpotQA by query type. CDTA’s advantage concentrates in multi-
+document queries, where Contextual also improves over Semantic but still lags. Results averaged
+over 3 runs (p <0.05).
+Query Type Fixed Recursive Semantic Contextual CDTA Gain vs Ctx
+Bridge (2 docs) 0.61 0.69 0.76 0.810.92+14%
+Comparison (2+ docs) 0.64 0.72 0.79 0.840.95+13%
+Simple (1 doc) 0.71 0.79 0.82 0.850.93+9%
+11
+CDTA’s advantage concentrates in query types requiring cross-document synthesis (bridge and
+comparison questions) with 13-14% gains over Contextual, versus 9% gain for simple factual queries.
+Contextual improves over Semantic across all query types (5-6% gains), showing document context
+helps even for single-document queries. However, Contextual’s gains remain modest compared to
+CDTA’s, particularly for multi-document questions where information fragmentation is most acute.
+This pattern validates our hypothesis: cross-document synthesis benefits queries that inherently
+require it most. Contextual helps by providing document-level framing, but cannot substitute for
+actual information consolidation across sources.
+5.4 Efficiency Considerations
+Indexing Costs.CDTA’s indexing process is more expensive than traditional methods. For a
+1,000-document corpus:
+•Fixed-Size: 0.1 seconds per document
+•Semantic: 2-3 seconds per document
+•Contextual: 4-6 seconds per document (semantic + context generation)
+•CDTA: 38-44 seconds per document
+This cost is incurred only once during indexing. For HotpotQA (5,901 documents), total indexing
+time was approximately 32 hours on our infrastructure (parallel processing with 8 workers). API
+costs for the UAE Legal corpus (847 documents) totaled approximately$420 for CDTA ($180 topic
+extraction,$195 relevance mapping,$45 synthesis) versus$78 for Contextual (context generation
+only).
+Query Performance.The information density of CDTA chunks enables efficient query process-
+ing. Retrieving fewer chunks to obtain necessary information reduces generator token consumption
+and speeds response generation. In our experiments, average query latency was 2.3s for CDTA vs
+2.6s for Contextual vs 2.7s for Semantic (k= 5).
+Break-Even Analysis.For applications with high query volumes (more then 10,000 queries per
+month), improved retrieval efficiency can offset higher indexing costs through reduced compute costs.
+The exact break-even point depends on specific deployment costs, query volumes, and infrastructure,
+but for typical RAG deployments with thousands of queries daily, the improved efficiency of CDTA
+chunks can justify the upfront indexing investment within several months of operation.
+5.5 Qualitative Analysis
+Qualitative Comparison: UAE Legal Data Retention Query
+Query:“What are the data retention requirements for financial records?”
+Semantic Chunkingretrieved three disconnected fragments: base six-year requirement,
+vague UAE national exception, and mention of a 2019 change. Generated answer was incom-
+plete, stating only “six years, with some exceptions for UAE nationals.”
+Contextual Retrievaladded document labels (DIFC Law 2007, Federal Decree 2018,
+DIFC Amendment 2019) to the same fragments. This improved attribution but didn’t solve
+fragmentation. Generated answer cited sources but hedged: “six years under DIFC Law 2007,
+with some exceptions per Federal Decree 2018. This may have changed in 2019.”
+CDTA Retrievalprovided a single synthesized chunk titled “Data Retention Require-
+12
+ments - Financial Institutions” containing: base requirement (six years, DIFC Law No. 1/2007),
+2019 amendment (extended to eight years), UAE national exception (ten years, Federal guid-
+ance), scope expansion (electronic communications, 2022 court ruling), and approved storage
+jurisdictions. Generated answer was complete and accurate: “Financial institutions must retain
+customer records for eight years under DIFC Law as amended in 2019, with ten-year require-
+ment for UAE nationals per Federal Decree. Records include all electronic communications per
+DIFC Court ruling 2022-CFI-045. Storage permitted in approved jurisdictions per regulatory
+guidance.”
+The comparison illustrates how cross-document synthesis solves the signal-to-noise problem:
+traditional approaches delivered low-signal fragments, Contextual added document labels to those
+fragments, while CDTA provided high-signal, low-noise context making answer generation straight-
+forward.
+6 Ablation Studies
+To understand which components contribute most to performance, we conducted ablation experi-
+ments on HotpotQA:
+Table 6: Ablation study on HotpotQA. Both relevance mapping and LLM-driven synthesis are
+critical. Results averaged over 3 runs (p <0.05).
+Configuration Faithfulness Change Description
+Full CDTA 0.93Baseline Complete 6-stage pipeline
+Without Synthesis 0.82 -11% Stage 5 removed (concatenation)
+Without Relevance Filter 0.87 -6% Stages 3A/3B removed
+Synthesis is essential.Replacing LLM-driven synthesis with simple concatenation of relevant
+segments resulted in 11-point degradation (p <0.05). Coherent reconstruction rather than mere
+aggregation drives performance gains.
+Relevance mapping is critical.Removing the relevance filtering stage caused 6-point faith-
+fulness drop (p <0.05). Without filtering, topic aggregations included tangentially related segments
+that introduced noise, degrading the quality.
+7 Discussion
+Results show our approach offers performance advantages for multi-hop reasoning, validating our
+core hypothesis. However, the value of this computationally intensive approach depends on specific
+deployment contexts [Zhao et al., 2024]. We now analyze conditions under which this new method
+excels and scenarios where simpler methods may suffice.
+7.1 When CDTA Excels
+It shows advantages in information environments characterized by knowledge fragmentation, com-
+mon in specialized domains.
+13
+High Information Fragmentation.CDTA is purpose-built for domains where knowledge
+about single topics systematically distributes across multiple documents. This includes regula-
+tory compliance, where complete understanding requires synthesizing foundational laws, amend-
+ments, and guidance notes, a core challenge of legal reasoning and knowledge fragmentation well-
+documented in the field [Zhong et al., 2020, Henderson et al., 2022, Chalkidis and Kampas, 2019].
+Temporal Knowledge Evolution.The methodology excels for corpora where information
+evolves through separately published updates. Document-centric approaches, even with contextual
+augmentation, cannot provide single representations of current law, whereas CDTA synthesizes base
+legal statutes with later modifications.
+Complex, Multi-Hop Queries.As HotpotQA results show [Yang et al., 2018], CDTA’s
+performance advantage concentrates in queries inherently requiring fact combination from multiple
+sources. For applications focused on complex question answering, automated literature reviews, or
+in-depth financial analysis, pre-synthesis of topic knowledge directly aligns knowledge base structure
+with query nature.
+7.2 When Simpler Methods Suffice
+CDTA’s indexing overhead offers diminishing returns in scenarios where the problem is less preva-
+lent.
+Single-Document Queries.For knowledge bases consisting of largely independent, ency-
+clopedic articles where answers are typically self-contained within single documents, contextual
+augmentation offers a more efficient solution. Our results show Contextual improves over Semantic
+by 3-4% for single-document queries while requiring only 2-3x indexing cost versus CDTA’s 10x
+cost.
+Cost-Constrained or Real-Time Indexing.For applications with extremely limited index-
+ing budgets or requiring near-instantaneous indexing of new documents, CDTA’s computational
+cost and latency (38-44s per document) may be prohibitive. Contextual augmentation (4-6s per
+document) offers a middle ground, better than simple methods while remaining tractable.
+7.3 Industry Methods as Baselines
+We included Contextual Retrieval as a baseline despite its origin in industry engineering documen-
+tation rather than peer-reviewed literature. This decision reflects a key reality in RAG system
+development: foundational techniques often emerge from industry labs and are deployed in produc-
+tion before academic publication. Contextual Retrieval now serves as best practice recommended
+by leading AI companies and actively used in real-world systems.
+For a benchmark to be meaningful for practitioners, it must compare against methods they’re
+actually considering. Ignoring industry techniques would make our results less relevant to real-
+world deployment decisions. However, we maintain scientific rigor by implementing and testing
+Contextual under the same controlled conditions as academic baselines, identical datasets, metrics,
+and evaluation protocols.
+7.4 Deployment Considerations
+Successfully transitioning CDTA to production requires addressing several practical challenges.
+Managing Cost and Latency.The primary operational challenge is the cost of LLM-intensive
+indexing pipeline. Mitigation strategies include using tiered model architecture, smaller, faster mod-
+els (like GPT-4o-mini) for high-volume tasks like binary relevance checks, while reserving powerful
+14
+models (like Claude 3.5 Sonnet) for nuanced synthesis. Process optimization through batching and
+parallelizing LLM API calls maximizes throughput.
+Quality Control.Final knowledge base quality directly depends on LLM performance. Prompts
+for topic extraction, relevance mapping, and synthesis are critical infrastructure requiring iterative
+testing against diverse document types. Post-synthesis splitting strategies handle cases where syn-
+thesis generates very long topic chunks exceeding optimal sizes for downstream retrieval.
+Update Strategies.This method is best suited for relatively static corpora. For corpora with
+periodic updates, implementing targeted re-computation is more efficient than full re-indexing.
+When a source document is modified, the system can identify all synthesized topic chunks that
+cited that document and trigger re-synthesis only for that specific subset.
+Ethical Considerations.Deploying in production requires careful attention to potential risks.
+LLMs can amplify biases present in source documents during synthesis, organizations should con-
+duct bias audits on synthesized content, particularly for sensitive domains like legal or medical
+applications. While CDTA maintains strict fidelity to source material, synthesis could inadver-
+tently create misleading connections between facts. Citation metadata and traceability to source
+documents are essential safeguards. In domains like legal and medical information, errors in syn-
+thesized content could have serious consequences, human expert review of high-stakes content is
+advisable before deployment.
+7.5 Limitations
+CDTA has several limitations worth noting:
+Computational Cost.High indexing cost ($420 for 847 documents versus$78 for Contextual)
+is the primary barrier to adoption. This makes CDTA most practical for high-value, relatively static
+knowledge bases where cost can be amortized over high query volumes.
+LLM Dependency.Entire pipeline quality depends on underlying LLM capabilities and po-
+tential biases. Errors in topic extraction or relevance mapping can propagate and degrade final
+synthesized chunk quality.
+Scalability.TheO(|T| × |S|) complexity of relevance mapping remains challenging for corpora
+at the scale of millions of documents. For our 847-document corpus, this required 756,000 API calls.
+Further optimization using advanced pre-filtering techniques is necessary for larger deployments.
+7.6 Future Directions
+Several promising research directions could extend this work:
+Hybrid Models.Combining CDTA with hierarchical intra-document methods like RAPTOR
+[Sarthi et al., 2024] could take the best from both approaches. CDTA could first perform cross-
+document synthesis to generate comprehensive topic documents, then RAPTOR could be applied
+to each synthesized document to create multi-level, searchable tree structures. Similarly, it could
+be combined with contextual augmentation, first unifying distributed information across documents
+through CDTA, then applying contextual techniques to preserve document-specific context within
+each synthesized chunk.
+Dynamic Synthesis.To mitigate high upfront indexing cost, a “late synthesis” approach
+could perform LLM-driven synthesis at query time rather than indexing time. The system would
+retrieve relevant base segments from multiple documents and synthesize on-the-fly. While this would
+increase query latency, it would eliminate expensive indexing phases and better suit highly dynamic
+data.
+15
+Specialized Models.Cost is largely driven by reliance on large, general-purpose LLMs. De-
+velopment and fine-tuning of smaller, specialized models explicitly trained for multi-source consol-
+idation, de-duplication, and coherent summarization could potentially achieve comparable quality
+at a fraction of the cost.
+8 Conclusion
+Performance of RAG systems is determined by chunking yet it remains understudied. While the
+field has made strides in preserving context within documents, knowledge fragmentation across
+remains a fundamental bottleneck for complex, multi-source queries. We introduce CDTA chunking,
+which reframes chunking from document partitioning to corpus-level knowledge reconstruction. By
+identifying topics globally and using LLMs to synthesize all relevant information into complete,
+coherent knowledge units, it directly tackles the distributed information challenge that has long
+challenged knowledge representation systems [Sowa, 2006].
+Our evaluation shows improvements in generation quality, particularly for tasks requiring multi-
+document reasoning. On multi-hop question answering [Yang et al., 2018], CDTA reached 0.93
+faithfulness, a 19% improvement over semantic chunking and 12% over contextual augmentation.
+The intensive indexing process is a computing investment, but leads to lower query times and a
+clear deployment profile for applications where retrieval quality and speed matter most.
+The trade-off between higher indexing costs and superior query-time performance positions
+CDTA as a tool for knowledge-intensive applications with relatively static corpora and high query
+volumes, such as regulatory compliance, technical support, and medical or legal analysis. By struc-
+turing information around topics, mirroring human conceptual organization rather than arbitrary
+textual boundaries, we enable more precise understanding. Future work will focus on optimizing
+the indexing pipeline and exploring hybrid models to broaden the applicability of this knowledge
+reconstruction paradigm.
+16
+References
+Anthropic. Contextual retrieval.https://www.anthropic.com/news/contextual-retrieval,
+2024. Accessed: 2024.
+Akari Asai, Zeqiu Wu, Yizhong Wang, Avirup Sil, and Hannaneh Hajishirzi. Self-rag: Learning to
+retrieve, generate, and critique through self-reflection. InThe Twelfth International Conference
+on Learning Representations, 2024.
+Ilias Chalkidis and Dimitrios Kampas. Deep learning in law: early adaptation and legal word
+embeddings trained on large corpora.Artificial Intelligence and Law, 27(2):171–198, 2019.
+Shahul Es, Jithin James, Luis Espinosa Anke, and Steven Schockaert. RAGAS: Automated evalu-
+ation of retrieval augmented generation. InProceedings of the 18th Conference of the European
+Chapter of the Association for Computational Linguistics: System Demonstrations, pages 150–
+158, 2024.
+Yunfan Gao, Yun Xiong, Xinyu Gao, Kangxiang Jia, Jinliu Pan, Yuxi Bi, Yixin Dai, Jiawei Sun,
+Haofen Wang, and Haofen Wang. Retrieval-augmented generation for large language models: A
+survey.arXiv preprint arXiv:2312.10997, 2023.
+Michael G¨ unther, Isabelle Mohr, Daniel James Williams, Bo Wang, and Han Xiao. Late chunk-
+ing: contextual chunk embeddings using long-context embedding models.arXiv preprint
+arXiv:2409.04701, 2024.
+Peter Henderson, Mark Krass, Lucia Zheng, Neel Guha, Christopher D Manning, Dan Jurafsky, and
+Daniel Ho. Pile of law: Learning responsible data filtering from the law and a 256gb open-source
+legal dataset.Advances in Neural Information Processing Systems, 35:29217–29234, 2022.
+Vladimir Karpukhin, Barlas Oguz, Sewon Min, Patrick SH Lewis, Ledell Wu, Sergey Edunov,
+Danqi Chen, and Wen-tau Yih. Dense Passage Retrieval for Open-Domain Question Answering.
+InEMNLP (1), pages 6769–6781, 2020.
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal,
+Heinrich K¨ uttler, Mike Lewis, Wen-tau Yih, Tim Rockt¨ aschel, et al. Retrieval-augmented gener-
+ation for knowledge-intensive nlp tasks.Advances in neural information processing systems, 33:
+9459–9474, 2020.
+Nelson F Liu, Kevin Lin, John Hewitt, Ashwin Paranjape, Michele Bevilacqua, Fabio Petroni,
+and Percy Liang. Lost in the middle: How language models use long contexts.arXiv preprint
+arXiv:2307.03172, 2023.
+Nils Reimers and Iryna Gurevych. Sentence-bert: Sentence embeddings using siamese bert-networks.
+arXiv preprint arXiv:1908.10084, 2019.
+Jon Saad-Falcon, Omar Khattab, Christopher Potts, and Matei Zaharia. ARES: An automated eval-
+uation framework for retrieval-augmented generation systems.arXiv preprint arXiv:2311.09476,
+2023.
+Parth Sarthi, Salman Abdullah, Aditi Tuli, Shubh Khanna, Anna Goldie, and Christopher D Man-
+ning. RAPTOR: Recursive abstractive processing for tree-organized retrieval. InThe Twelfth
+International Conference on Learning Representations, 2024.
+17
+John F Sowa. The challenge of knowledge soup.Research trends in science, technology and mathe-
+matics education, pages 55–90, 2006.
+Yumo Xu and Mirella Lapata. Coarse-to-fine query focused multi-document summarization. InPro-
+ceedings of the 2020 Conference on empirical methods in natural language processing (EMNLP),
+pages 3632–3645, 2020.
+Shi-Qi Yan, Jia-Chen Gu, Yun Zhu, and Zhen-Hua Ling. Corrective retrieval augmented generation.
+arXiv preprint arXiv:2401.15884, 2024.
+Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William W Cohen, Ruslan Salakhutdinov,
+and Christopher D Manning. HotpotQA: A dataset for diverse, explainable multi-hop question
+answering.arXiv preprint arXiv:1809.09600, 2018.
+Penghao Zhao, Hailin Zhang, Qinhan Yu, Zhengren Wang, Yunteng Geng, Fangcheng Fu, Ling
+Yang, Wentao Zhang, Jie Jiang, and Bin Cui. Retrieval-augmented generation for ai-generated
+content: A survey.arXiv preprint arXiv:2402.19473, 2024.
+Haoxi Zhong, Chaojun Xiao, Cunchao Tu, Tianyang Zhang, Zhiyuan Liu, and Maosong Sun.
+How does nlp benefit legal system: A summary of legal artificial intelligence.arXiv preprint
+arXiv:2004.12158, 2020.
+18
+Appendix A: Prompt Templates
+A.1 Topic Extraction Prompt
+Role:You are a meticulous AI research assistant specializing in semantic analysis.
+Objective:Analyze the provided text segment and identify all distinct, high-level conceptual topics
+it discusses. For each topic, generate a focused description and a one-sentence summary.
+Instructions:
+1. Read the entire segment carefully to understand its content.
+2. Identify conceptual themes, not just keywords. For example, a discussion about “server uptime
+requirements” and “disaster recovery protocols” should be identified as a topic like “System
+Reliability and Business Continuity.”
+3. Generate a unique name for each topic that is a noun phrase.
+4. Generate a description that crisply summarizes the topic’s scope.
+5. Format your response as valid JSON containing a list under the key “topics”.
+Text Segment:[Document Segment Text]
+Response Format:
+{
+"topics": [
+{
+"name": "[Topic Name]",
+"description": "[Brief description]"
+}
+]
+}
+19
+A.2 Relevance Check Prompt
+Role:You are an AI relevance classifier making strict binary judgments.
+Topic Name:[Topic Name]
+Topic Description:[Topic Description]
+Text Segment:[Document Segment Text]
+Question:Does the text segment above contain information that is directly and substantively
+relevant to the topic?
+Respond with only a single word:“true” or “false”.
+20
+A.3 Knowledge Synthesis Prompt
+Role:You are an expert AI knowledge synthesizer.
+Objective:Synthesize the provided source fragments into a single, well-structured, coherent doc-
+ument that comprehensively explains the topic.
+Topic:[Topic Name]
+Topic Description:[Topic Description]
+Source Fragments:
+•“[Document Chunk 1]”
+•“[Document Chunk 2]”
+•...
+Instructions:
+1.Comprehensiveness:Include every piece of relevant information from the sources.
+2.Coherence:Weave information into a logical narrative with clear structure.
+3.Fidelity:Adhere strictly to source information. Do not add external knowledge. If sources
+conflict, note the contradiction.
+4.Conciseness:Remove redundancy. If multiple fragments state the same fact, present it once.
+5.Attribution:Note which sources contributed key information where appropriate.
+Respond only with the synthesized document text.
+21

@@ -1,0 +1,2041 @@
+Connect the Dots: Knowledge Graph–Guided Crawler Attack on
+Retrieval-Augmented Generation Systems
+Mengyu Yao1, Ziqi Zhang2, Ning Luo3, Shaofei Li1, Yifeng Cai1, Xiangqun Chen1, Yao Guo1 and Ding Li1
+1MOE Key Lab of HCST (PKU), School of Computer Science, Peking University
+2Department of Computer Science, University of Illinois Urbana-Champaign
+3Department of Electrical and Computer Engineering, University of Illinois Urbana-Champaign
+Abstract
+Stealing attacks pose a persistent threat to the intellectual
+property of deployed machine-learning systems. Retrieval-
+augmented generation (RAG) intensifies this risk by extend-
+ing the attack surface beyond model weights to knowledge
+base that often contains IP-bearing assets such as proprietary
+runbooks, curated domain collections, or licensed documents.
+Recent work shows that multi-turn questioning can gradu-
+ally steal corpus content from RAG systems, yet existing
+attacks are largely heuristic and often plateau early. We ad-
+dress this gap by formulating RAG knowledge-base stealing
+as an adaptive stochastic coverage problem (ASCP), where
+each query is a stochastic action and the attacker’s goal is
+to maximize the conditional expected marginal gain (CMG)
+in corpus coverage under a query budget. Bridging ASCP to
+real-world black-box RAG knowledge-base stealing raises
+three challenges: CMG is unobservable, the natural-language
+action space is intractably large, and feasibility constraints
+require stealthy queries that remain effective under diverse
+architectures. We introduce RAGCRAWLER, a knowledge
+graph-guided attacker that maintains a global attacker-side
+state to estimate coverage gains, schedule high-value se-
+mantic anchors, and generate non-redundant natural queries.
+Across four corpora and four generators with BGE retriever,
+RAGCRAWLERachieves 66.8% average coverage (up to
+84.4%) within 1,000 queries, improving coverage by 44.90%
+relative to the strongest baseline. It also reduces the queries
+needed to reach 70% coverage by at least 4.03× on average
+and enables surrogate reconstruction with answer similarity
+up to 0.699. Our attack is also scalable to retriever switching
+and newer RAG techniques like query rewriting and multi-
+query retrieval. These results highlight urgent needs to protect
+RAG knowledge assets.
+1 Introduction
+Intellectual property (IP) theft remains a central concern
+across the AI service landscape. A large body of work on
+model-stealing attacks and defenses [15, 20, 21, 30, 33, 34, 43,
+50, 60, 63, 64, 68, 70, 75, 79, 84] underscores the urgency of
+protecting proprietary AI assets and preventing information
+theft. As modern AI service architectures grow increasingly
+complex, the IP attack surface extends beyond the model it-
+self, requiring immediate investigation and comprehensive
+defense strategies.
+Retrieval-Augmented Generation (RAG), now a ubiquitous
+architecture grounded in proprietary data, extends the attack
+surface to the retrieval corpus that sits on the path of every
+response. RAG couples a generator with a retriever over a
+document collection, using retrieved documents to improve
+factuality and domain adaptation [35, 40]. In enterprise and
+vertical deployments, the corpus often contains IP-bearing as-
+sets (e.g., proprietary runbooks and policies, curated domain
+data, and licensed materials) whose acquisition and mainte-
+nance are costly [6,52,80]. Because each response is grounded
+in retrieved documents, the public chat or API interface [27]
+becomes an attack surface: an attacker can progressively steal
+more of the underlying corpus using curated queries. Stealing
+a sufficiently large portion of the corpus can be enough to
+replicate the service: an attacker can pair the stolen corpus
+with an off-the-shelf LLM to build a substitute RAG assistant
+that approximates the victim’s behavior without access to the
+original deployment [76].
+Recent studies highlight thatknowledge-base stealing
+poses an important and growing threat to deployed RAG
+systems, with direct copyright, licensing, and privacy im-
+plications for IP-bearing corpora [32, 66, 76, 85]. Attackers
+can elicit verbatim or near-verbatim spans from RAG out-
+puts [66, 85], and sustained multi-turn interaction can cumu-
+latively expand the portion of a hidden corpus that becomes
+exposed [32, 76]. However, existing attacks typically gener-
+ate prompts by locally reacting to the most recent response,
+either continuing the thread or pivoting on extracted key-
+words [32, 76]. Such heuristics often drift off-topic (left panel
+of Fig. 1 (a)) or revisit already-exposed regions (middle panel
+of Fig. 1 (a)), wasting query budget and plateauing early, leav-
+ing much of the corpus unexplored (Fig. 1 (b)). Moreover,
+1
+arXiv:2601.15678v2  [cs.CR]  5 Feb 2026
+while prior empirical studies demonstrate the knowledge-
+base theft, theoretical grounding and provable guarantees for
+coverage-maximizing attacks remain unknown. This moti-
+vates a critical question:can the adversary steal the data
+more efficiently, and where is the limit?
+To address this question, we identify the fundamental gap
+in existing work:lack of a principled objective to maximize
+global corpus coverage. Without such an objective, query
+selection is driven by local reactions to the latest response,
+providing no globally consistent criterion to avoid redundancy
+and systematically expand coverage across turns. An effective
+knowledge-base stealing strategy should instead exploit the
+global stateaccumulated over the entire interaction history
+and choose each query by itsexpected marginal contribution
+to previously unseen corpus content.
+We formalize this global objective by casting RAG
+knowledge-base stealing asRAG Crawling, an instance of the
+Adaptive Stochastic Coverage Problem (ASCP)[26,58,78].
+In our reduction, each query is an action that stochastically re-
+veals a subset of hidden documents through retrieval, and the
+attacker aims to maximize the expected coverage of unique
+corpus items under a fixed query budget. ASCP provides
+an adaptive-greedy benchmark that selects the query with
+the largestconditional expected marginal gain (CMG)at
+each step. We further prove thatRAG Crawlingsatisfies
+adaptive monotonicity and adaptive submodularity; thus, un-
+der the same budget of B queries, the CMG-based adaptive
+greedy attack is provably near-optimal, achieving a(1−1/e) -
+approximation to the expected corpus coverage attainable by
+an optimal adaptive attacker.
+However, implementing this theory into a practical black-
+box attack faces three key instantiation challenges. ❶ CMG
+is unobservable:the attacker cannot directly measure the
+coverage increment induced by a query and its retrieval out-
+come without corpus access, so the true CMG cannot be
+exactly computed. ❷ The action space is intractable:the
+query space Q is effectively unbounded (any natural-language
+string), making it infeasible to exhaustively search for the
+CMG-maximizing query without additional structure.❸ Real-
+world feasibility constraints are strict:queries must remain
+natural and innocuous to avoid detection or refusal, and high-
+gain intents must be expressed in policy-compliant surface
+forms that remain stable under query rewriting and multi-
+query retrieval.
+To solve these challenges, we introduce RAGCRAWLER, a
+novel attack framework consisting of three stages: knowledge
+graph construction, strategy scheduling, and query generation,
+that together overcome the above challenges. RAGCRAWLER
+maintains an attacker-side knowledge graph (KG) that pro-
+vides a global summary of acquired information and supports
+planning. With this global state, RAGCRAWLERfirst uses KG
+growth in KG construction phase to estimate coverage gain
+and CMG. RAGCRAWLERnext prunes the action space by
+selecting high-value semantic anchors in strategy scheduling
+phase. These semantic anchors are determined based on his-
+torical gains and the structural exploration of the KG. During
+the query generation phase, RAGCRAWLERenforces real-
+world feasibility by turning top-ranked anchors into fluent,
+policy-compliant natural-language queries with history-aware
+deduplication. Together, these three stages form a practical
+instantiation of the adaptive greedy policy for ASCP.
+Experiments across diverse deployments show that
+RAGCRAWLERsubstantially improves RAG knowledge-
+base stealing effectiveness. Across four datasets and four
+RAG generators (including safeguard variants), it achieves up
+to 84.4% corpus coverage within a 1,000-query budget with
+BGE retriever. It improves coverage by 44.90% relative to the
+best baseline and reduces the queries needed to reach 70%
+coverage by at least 4.03× on average. The stolen content
+also supports service replication: a surrogate RAG built from
+the recovered corpus reaches up to 0.699 answer similarity
+to the victim system. RAGCRAWLERis scalable to other
+RAG techniques like retriever switching, query rewriting, and
+multi-query retrieval.
+Our contribution.
+• Theory.We formalize RAG knowledge-base stealing as
+RAG Crawling, an adaptive stochastic coverage problem.
+We provide a principled, objective, and theoretical ground-
+ing for coverage-maximizing black-box attacks.
+• System.We design RAGCRAWLER, a knowledge graph–
+guided crawler that instantiates the adaptive greedy cover-
+age principle under real-world constraints.
+• Evaluation.We conduct extensive evaluations across
+diverse settings to demonstrate the effectiveness of
+RAGCRAWLER, as well as against modern RAG defenses.
+2 Motivating Example
+Consider an attacker targeting a paid support troubleshooting
+RAG assistant, which is backed by a vendor support por-
+tal (Fig. 1(a)). Such portals are often built on private issue
+tracking tickets and internal resolution notes, and are usually
+considered IP assets [8]. In our example, we will select three
+representative issues and assign an icon to each. ♂save(storage),
+/sync-alt(replication) , and /user-lock(authentication) represent three is-
+sues. The attacker’s goal is to steal as much of the hidden
+knowledge base as possible through multi-round queries. By
+repackaging the stolen knowledge, attackers can mount fur-
+ther downstream attacks such as rehosting the RAG system,
+bypassing access controls, undercutting subscriptions, or vio-
+lating licensing and trade secret protections [76].
+Existing stealing attacks mainly rely on two local heuristics,
+continuation expansionandkeyword expansion. In the first
+strategy (e.g., RAGThief [32]), the new query is built on the
+context of existing answers. The problem of this strategy is
+that the query can easilydrift awayfrom the actual corpus
+content. For example, in Fig. 1 (a), the last answer about
+Issue ♂saveattributes the failure to a dependency package /cube. A
+2
+A2Issue        :      Module, Hotfix,Root cause, Symptom …Issue        :      Module, Symptom, Root cause, Hotfix …… A1A3Continuation ExpansionKeyword ExpansionGlobal Strategy (Ours) recent answers
+parse
+ graph state
+(a) Methods Illustration
+Issue        :      Module, Symptom, Root cause, Dependency …
+Answers
+’s dependency?  
+I don’t know.Already known.
+Root cause of      ?  
+It is …… 
+’s hotfix steps?  
+Drift Away
+Repeat Query
+Fill Gaps
+keywordspoolextract 
+Private Corpus
+(b) Coverage Performance
+(c) Queries Distribution
+keywordnodes/edgesextract
+Figure 1:A motivating example.(a) A RAG knowledge-base stealing scenario on an IP-bearing troubleshooting corpus. Upper
+answers represent knowledge obtained from earlier attack rounds. The continuation strategy follows the recent answer, which can
+drift away from the corpus; the keyword strategy pivots on extracted keywords, often yielding redundant information from the
+same semantic region; our proposed strategy maintains a global graph, detects unrevealed facts and targets them with new queries.
+(b) Knowledge coverage w.r.t query number for each strategy on an example corpus. (c) Distribution of retrieved document in the
+corpus’ semantic space. Each point is a document, with colors indicating queries from different strategies.
+continuation-based attacker will ask about /cubenext, but since
+it is not in the licensed knowledge base’s scope, this line of
+questioning yields no useful information. Akeyword-based
+strategy(e.g., IKEA [76]) pivots each new query around
+key terms of previous answers, keeping it mostly within the
+same semantic neighborhood of the corpus. For example, in
+Fig. 1 (a), the keyword-based attackrepeatedly asksabout
+♂save’s root cause and does not explore new contents.
+Our approach maintains agrowing knowledge graphthat
+summarizes discovered entities and relations for globally-
+planned exploration. Fig. 2 shows the knowledge graph of our
+attack. Nodes represent entities (e.g., issues, hotfixes, mod-
+ules), and edges capture relations or co-occurrences (e.g., is-
+sue → hotfix). As new answers arrive, the graph is expanded
+with all new entities or relations. By maintaining this global
+knowledge state, the attacker can detect gaps in what has been
+revealed so far. As illustrated in Fig. 2, the knowledge graph
+Module
+Dependency
+Module
+Root Cause
+Hotfix
+Module
+Hotfix
+Hotfix
+Symptom
+Symptom
+Symptom
+Root Cause
+Root Cause
+A Possible Gap Detected !
+Figure 2:Illustration of gap detection by the Global Strat-
+egy (Ours).The strategy identifies from the graph that the
+storage issue (♂save) has a missingHotfixfacet, and guides the
+next exploration step to complete this unrevealed knowledge.
+dynamically reveals incomplete regions of information. For
+instance, the graph shows that the issue ♂savehas no revealed
+Hotfix, while the other issues (/user-lockand /sync-alt) already have their
+hotfix information identified. Then the next query will be di-
+rected to the uncovered data of ♂save’s unobserved hotfix steps,
+expanding overall coverage.
+Our empirical results show that using this global knowl-
+edge graph significantly improves the coverage rate. Fig. 1 (b)
+shows the knowledge coverage rate vs. the number of queries
+for our attack and two baseline strategies. Guided by the
+global knowledge graph, our attack (green line) converges
+much faster than continuation-based (orange curve; focusing
+on unrelated queries) and keyword-based (blue curve; focus-
+ing on repetitive queries) strategies. Fig. 1 (c) provides a
+qualitative view of how each strategy explores the semantic
+space of the corpus. Each point denotes a document, and the
+black box indicates the knowledge-base space. Guided by
+the global knowledge graph, our attack (green points) spread
+widely across the space and covers many different clusters of
+information. The continuation-based queries (orange points)
+follow a narrow path through the space, gradually drifting
+away from the space center. Keyword-based queries (blue
+points) form a few dense clusters around specific topics.
+3 Background
+3.1 Retrieval-Augmented Generation Systems
+A Retrieval-Augmented Generation (RAG) system S typi-
+cally comprises a generator G (an LLM), a retriever R , and a
+document collection D. Given a user query q, the retriever R
+3
+begins by producing an embedding for q and based on some
+similarity function (typically cosine similarity), fetching the
+k most relevant documents:
+Dk(q) =arg top-k d∈D sim(q,d).(1)
+where sim(·) represents the similarity function, and arg top-k
+selects the top-k documents with the highest similarity scores.
+The generator G then produces an answer conditioned on the
+query and retrieved context [40]:
+a=G
+ 
+wrapper(q,D k(q))
+
+,(2)
+where wrapper(·,·) denotes the system prompt that interleaves
+qwith the retrieved documents.
+In practice, deployed RAG pipelines often incorporate
+guardrails or enhancements. The most commonly used are
+query rewritingandmulti-query retriever.
+Query rewriting[47,53,56,77] transforms the original query
+to improve retrievability, resolve ambiguity, repair typos, or
+strip unsafe instructions. The downstream retrieval and gener-
+ation processes then operate on the rewritten query.
+Multi-query retrieval[39,45] generates multiple paraphrases
+of the original query and retrieves independently for each,
+aggregating the results into a candidate pool. Rather than
+concatenating all retrieved documents, RAG systems typi-
+cally re-rank candidates to select the most relevant ones, with
+Reciprocal Rank Fusion (RRF)[19] widely used. While not
+a dedicated defense, multi-query retrieval’s altered retrieval
+dynamics may change the attack surface.
+3.2 Adaptive Stochastic Coverage Problem
+TheAdaptive Stochastic Coverage Problem(ASCP) mod-
+els budgeted coverage maximization in sequential decision-
+making under uncertainty. At each step, an agent selects an
+action, observes what it reveals, and adapts future actions
+based on the observations so far. The objective is to maximize
+expected coverage under a limited budget, such as a limited
+number of actions. An ASCP instance can be specified by:
+• Item universe (U): The item universe U represents the set
+of all items that are available for coverage.
+• Action space (Q ): The action space Q consists of all pos-
+sible actions. Each action q can potentially reveal (cover) a
+subset of items inU.
+• Stochastic outcome (realization Φ and OΦ(q)): Uncer-
+tainty is modeled by a latent realization Φ (a “state of the
+world”) drawn from a distribution. Conditioned on Φ, exe-
+cuting actionqreveals an outcome setO Φ(q)⊆U.
+• Cost and budget (c(q),B): The cost c(q) represents the
+resources required to perform action q, and B is the total
+available budget.
+• Coverage function ( f(S,Φ) ): The coverage function
+f(S,Φ) quantifies the utility of what has been revealed by
+a set of actions S under realization Φ. For coverage objec-
+tives,fis commonly a function of the union S
+q∈S OΦ(q).
+Theorem 1(Approximation guarantee of adaptive greedy [26,
+37, 38, 58, 78]).Assume f is adaptively monotone and adap-
+tively submodular. Under a cardinality budgetB, the adaptive
+greedy policy πgreedy (maximizing CMG at each step) achieves
+a (1−1/e) -approximation to the optimal expected coverage1
+attained by the optimal adaptive policy π⋆ under same budget.
+We reduceRAG knowledge-base stealingto ASCP by
+formalizing it asRAG Crawling(Sec. 5), enabling CMG-
+based greedy optimization as a principled strategy for globally
+planned stealing under a query budget.
+3.3 Knowledge Graph
+Knowledge graph (KG) is a widely-used knowledge rep-
+resentation technology to organize huge amounts of scat-
+tered data into structured knowledge. Formally, a KG is
+a directed, labeled graph G= (E,L,R) , where E is the
+set of entities, R is the set of relation types (edge labels),
+and L⊆E×R×E is the set of labeled, directed edges
+(facts). Each edge l∈L is a triple (h,r,t) that connects
+head h∈E to tail t∈E via relation r∈R . For example,
+(Python,instanceOf,Programming Language).
+Compared with unstructured text, KGs provide schema-
+aware, canonicalized facts with explicit connectivity and con-
+straints [31]. We leverage the knowledge graph to construct an
+attacker-side state that makes coverage estimable, constrains
+exploration to a compact semantic action space, and records
+provenance for robust, auditable updates.
+4 Threat Model
+Scenario.As illustrated in Fig. 3, we consider a production
+RAG system accessed through a black box interface such
+as an API or chat. Internally, a retriever selects passages or
+documents from a corpus D and a generator composes an an-
+swer from the query and the retrieved documents [35, 40]. In
+deployment the generator may rewrite, summarize, or refuse
+according to guardrails and access policies [10, 39]. The ser-
+vice does not reveal retrieval scores or document identifiers.
+The attacker has no insider access and interacts as a normal
+user. The attacker aims to steal as much of D as possible by
+steering retrieval to cover new items across turns.
+Prior work has identified two classes of such stealing at-
+tacks in RAG systems:Explicitattacks append overt adver-
+sarial instructions to elicit verbatim disclosure of retrieved
+text [18, 22, 32, 85].Implicitattacks use benign-looking
+queries and aggregate factual content that the system legiti-
+mately returns across turns, reconstructing corpus via para-
+phrases and fragments [76]. Our focus is the implicit regime,
+which better matches real usage and evades refusal rules.
+Adversary’s Goal.The attacker aims to steal the knowledge
+base D as completely as possible while remaining stealthy.
+1(1−1/e)≈0.63
+4
+Covered SetNewly Covered
+RAG System(Black Box)
+RetrieverLLMAttacker
+Private Corpus 𝓓
+queryanswerStealthily Cover 
+interface
+Figure 3:Threat model.An external attacker hasblack-box
+access to a deployed RAG system and can only interact via
+its public query interface. For each query, the retriever selects
+a set of documents from the corpus and the LLM generates
+an answer conditioned on these documents. Across turns, the
+attacker aims to stealthily expand the union of leaked retrieved
+items under a query budget.
+Leakage may appear as verbatim text, paraphrases, summaries,
+or factual statements grounded in retrieved documents. At
+round t, the adversary submits qt and the system internally
+consults a hidden retrieved set Dk(qt )⊆D to generate the
+answer. Over B queries, the objective is to maximize the
+fraction of unique retrieved items:
+max
+{q1,···,q B}
+SB
+t=1 Dk(qt )
+
+|D| (3)
+The budget B models practical constraints such as API cost
+and the need to limit suspicious activity.
+Adversary’s Capabilities.We assume black box access: the
+attacker submits adaptive natural language queries and ob-
+serves only final answers. They have no access to retrieval
+scores, identifiers, indices, or intermediate states, and they
+cannot modify the retriever or poison the corpus. Following
+prior work [18, 32, 76], we assume a coarse topic phrase of
+the target knowledge base is known, as it is often exposed by
+product descriptions, onboarding pages, or brief interaction.
+We also evaluate a weaker attacker with no topic prior that
+issues one benign probe query and compresses the response
+into a short topic phrase using an attacker-side LLM (the
+probe counts toward the budget; Appendix D).
+5 Reducing RAG Crawling to ASCP
+We formalize the attacker’s goal asRAG Crawlingand reduce
+it to ASCP (Sec. 3.2). In this way, coverage-maximizing adap-
+tive greedy policies can provide a principled benchmark. We
+instantiate the ASCP components as follows:
+• Item universe (U).We set U:=D , the attacker-hidden
+corpus, where each item is an atomic document or passage.
+• Action space (Q ).We set Q to be the set of all valid natural-
+language queries the attacker may issue to the victim RAG.
+• Stochastic outcome (realization Φ and OΦ(q)).Let Φ
+denote a latent realization of the victim RAG pipeline that
+determines retrieval outcomes (including any nondetermin-
+ism and attacker-unknown processing such as rewriting or
+multi-query retrieval). Conditioned on Φ, issuing query q
+leads the pipeline to use a hidden set of k retrieved items
+to generate the final answer; we denote this outcome by
+OΦ(q):=D Φ
+k (q)⊆D.(4)
+• Cost and budget ( c(q),B).We assume unit query cost
+c(q) =1 , so the attacker can issue at most B queries. This
+matches common deployment settings where the service
+API charges on a per-query basis: each query consumes
+one billable request regardless of its exact content.
+• Coverage function ( f(S,Φ) ).For a set of queries S⊆Q
+and realizationΦ, the coverage function is
+f(S,Φ):=
+
+[
+q∈S
+OΦ(q)
+ ,(5)
+which matches adversary’s goal (Eq. 3) up to a constant.
+We next define conditional expected marginal gain (CMG)
+as follows. CMG is the oracle quantity optimized by adaptive
+greedy in ASCP.
+Definition 1(Conditional Expected Marginal Gain in RAG
+Crawling).Let ψR
+t−1 denote the currentretrieval-levelpartial
+realization (i.e., the executed query–outcome pairs under the
+latent realization Φ) after t−1 issued queries, and let St−1 ⊆
+Q be the set of queries issued so far. Theconditional expected
+marginal gain(CMG) of a new query q∈Qgivenψ R
+t−1 is
+∆(q|ψ R
+t−1 ):=E Φ|ψR
+t−1
+[f(S t−1 ∪ {q},Φ)−f(S t−1 ,Φ)].(6)
+We then show that RAG Crawling satisfies the assumptions
+required by ASCP’s greedy approximation theory.
+Theorem 2(Adaptive Monotonicity and Submodularity in
+RAG Crawling).The RAG Crawling problem instance satis-
+fies adaptive monotonicity and adaptive submodularity.
+The proof can be found in Appendix A. Building on Theo-
+rem 1 and Theorem 2, we have the following:
+Theorem 3(Near-optimality guarantee of the adaptive greedy
+policy for RAG Crawling).The adaptive greedy policy for
+RAG Crawling, which at each step t selects a query
+qt ∈argmax
+q∈Q
+∆(q|ψ R
+t−1 ),(7)
+achieves a (1−1/e) -approximation to the optimal expected
+coverage under the same query budget.
+6 RAGCRAWLER
+Theorem 3 provides a theoretical guarantee on optimal cov-
+erage of RAG Crawling. We now present RAGCRAWLER,
+which instantiates the adaptive greedy policy for RAG
+knowledge-base stealing and enables real-world attacks that
+achieve 66.8% coverage on average with only 1,000 queries.
+5
+𝑞!𝑎!
+𝓖𝟎
+𝑨𝒏𝒄𝟎
+KG-ConstructorStrategy SchedulerQuery Generator
+𝑞#𝑎#
+𝓖𝟏
+𝑨𝒏𝒄𝟏 𝑞$……
+RAGCrawler
+……
+RAG
+Figure 4:The workflow of RAGCRAWLER.At each step,
+(1) The KG-Constructor processes the latest system response
+to update the knowledge graph. (2) The Strategy Scheduler
+analyzes this graph to select a strategic anchor. (3) The Query
+Generator uses this anchor to formulate the next query.
+6.1 Overview
+In this section, we explain the workflow of RAGCRAWLER
+(Fig. 4). RAGCRAWLERimplements a closed-loop crawler
+that alternates between graph state estimation, anchor schedul-
+ing, and natural query realization.
+At round t, the attacker issues qt and observes only the
+answer text at, while the retrieved documents remain hidden
+in the black-box setting. Each answer at is processed byKG-
+Constructorto extract a step-wise knowledge subgraph and
+update the attacker-side state toGt. Based on Gt, theStrategy
+Schedulerselects a semantic anchor Anct to approximate
+which direction is likely to yield highmarginal coverage gain
+in subsequent queries, where we define Anct ≜(e ∗
+t ,r ∗
+t ) as
+an entity with an optional relation target. Finally, theQuery
+Generatorrealizes Anct into a fluent and policy-compliant
+query qt+1, sends it to the victim RAG, and the loop repeats.
+To bootstrap a non-empty graph state, we run a brief topic
+conditioned seeding phase that generates a few broad queries,
+and all seeds count toward the budget.
+This adaptive loop systematically addresses the three chal-
+lenges of the ASCP framework. Next, we elaborate on the
+specific mechanisms employed for each challenge.
+6.2 KG-Constructor
+This module addresses the first challenge in the ASCP for-
+mulation:the CMG of the attacker’s action is unobservable.
+Since the attacker cannot directly observe which documents
+have been retrieved by the RAG system, the true coverage
+increment of each query remains hidden.
+KG-Constructor makes coverage gains estimable by con-
+verting answer text into an attacker-side knowledge graph
+that compactly summarizes revealed content. Specifically, we
+maintain an evolving graph state Gt that approximates the la-
+tent coverage function f(S,Φ) , making CMG estimable from
+surface-level answers. The workflow is shown in Fig. 5.
+KG-Constructor
+𝑎!Topic-specific prior
+Attacker-side LLMreflectionextraction
+𝓖𝒕"𝟏
+∆𝓖𝒕
+𝓖𝒕
+merge
+embeddings
+merge if sim>𝜏
+Figure 5:KG-Constructor.Guided by a Topic-Specific Prior,
+the iterative extraction and reflection process generates a
+knowledge subgraph ( ∆Gt), which is then refined through
+incremental graph update to produce the final graph state Gt.
+Why existing approaches do not work.Existing KG con-
+struction pipelines do not fit our setting because we require
+consistent, lightweight incremental updates from partial and
+evolving answers, without access to the underlying corpus.
+OpenIE-style extraction [83] produces free-form relations
+that drift across rounds, causing redundancy and unstable typ-
+ing, while schema-constrained methods [71] reduce variance
+but typically assume a fixed ontology and full-data access.
+LLM-based construction [12, 65] and graph-augmented RAG
+frameworks (e.g., GraphRAG [24], LightRAG [28]) mainly
+target one-shot document parsing and retrieval quality, and
+thus do not provide compact, efficient coverage tracking over
+many rounds of dynamic responses.
+Our methods.Our KG-Constructor supports efficient incre-
+mental maintenance by extracting a per-answer subgraph and
+merging it into the global graph. At roundt, the attacker treats
+the observed answer at as the only evidence and extracts a
+typed triple set {(h,r,t)} , where h and t are entity mentions
+(or attribute values) andr is a semantic relation type. We build
+a knowledge delta ∆Gt using unique h/t mentions as nodes
+and triples as directed edges, and merge it into Gt−1 to obtain
+Gt without rebuilding from scratch. As shown in Fig. 5, the
+workflow has three modules:
+1) Topic-Specific Prior.We derive a lightweight topic-
+specific schema prior to keep extraction focused and con-
+sistent across rounds. Given only a coarse topic signal, we
+instruct an attacker-side LLM to propose a compact set of
+entity categories and relation types for the domain (e.g.,dis-
+ease,symptom,treatment, and relations such ashas_symptom,
+treated_by). During extraction, the LLM prioritizes these
+schema elements as soft constraints, filtering off-topic con-
+tent and keeping triples within the topical boundary. This
+schema stabilizes relation typing across rounds and keeps
+prompts compact because the LLM conditions on the abstract
+schema rather than the full graph, reducing overhead while
+preserving topical precision.
+2) Iterative Extraction and Reflection.This component uses
+the attacker-side LLM to process the new answer. To reduce
+missing edges caused by conservative extraction, we adopt
+6
+Strategy Scheduler
+𝓖𝒕
+Score cache and lazy update
+RobustSampling
+𝛼!⋅𝐸𝑚𝑝𝑖𝑟𝑖𝑐𝑎𝑙	𝑃𝑎𝑦𝑜𝑓𝑓𝛽!⋅𝐺𝑟𝑎𝑝ℎ	𝑃𝑟𝑖𝑜𝑟
+𝑨𝒏𝒄𝒕		(𝒆𝒕∗,𝒓𝒕∗)
+CMG Estimation of Entities
+Relation Selection𝒆𝒕∗Entity Selection
+Figure 6:Strategy Scheduler.The scheduler selects an action
+from the graph Gt via a two-stage process. First, it samples an
+entity (e∗
+t ) based on a score that estimates CMG by balancing
+two key metrics. Second, it selects a relation (r∗
+t ) by identi-
+fying the entity’s largest local information deficit. A score
+cache with lazy updates ensures the efficiency of this process.
+a multi-round extraction–reflection procedure. As shown in
+Fig. 5, each answer is first processed by an “extraction” pass,
+and then reprocessed through a “reflection” pass that revisits
+the same content with awareness of previously omitted facts.
+This reflection loop enables the LLM to infer implicitly ex-
+pressed relations and produce additional triples, forming a
+more comprehensive knowledge subgraph∆G t.
+3) Incremental Graph Update and Semantic Merging.We
+finally update the global graph by merging ∆Gt into Gt−1
+with a lightweight attacker-side operation. This integration
+is implemented as a lightweight merging operation without
+rebuilding graph from scratch. To ensure that the graph struc-
+ture reflects genuine semantic expansion rather than redun-
+dant surface-level variations, we perform a semantic merging
+stage. All entity mentions and relation phrases are encoded
+into a shared embedding space using a pre-trained encoder.
+Node or edge pairs whose cosine similarity exceeds a thresh-
+oldτare automatically identified and merged.
+This normalization consolidates synonymous mentions
+across rounds, keeps Gt compact and stable for CMG estima-
+tion and planning space for Strategy Scheduler (Sec. 6.3).
+6.3 Strategy Scheduler
+This module addresses the second challenge of the ASCP
+formulation:attacker action space is intractable. Operating
+on the knowledge graph from the KG-Constructor, its task is
+to select the optimal entity-relation pair (e.g., (♂save,HotFix)) to
+guide the next query. The challenge is the space of potential
+strategic actions is combinatorially vast, rendering a brute-
+force search for the optimal pair computationally infeasible.
+Our key insight isan asymmetry between entities and rela-
+tions: entities are the primary drivers of coverage expansion,
+while relations refine the exploration direction. Exploiting this
+asymmetry, we reframe the problem into a hierarchical two-
+stage decision: first select an entity, then pick its unexplored
+relation to probe. The workflow is shown in Fig. 6.
+Entities Selection.We estimate the utility of each entity in
+Gt using two complementary metrics:empirical payoffand
+graph prior. Theempirical payoffcaptures historical infor-
+mation gain and reflects how informative an entity has been
+in past queries. Thegraph priorexploits the topology of the
+knowledge graph to identify entities located in structurally
+under-explored regions. We combine them into a composite
+score and sample the anchor entity from a Top- K softmax
+distribution to preserve diversity under noisy estimates.
+Empirical payoff. We define the empirical payoff of an en-
+tityevia an upper-confidence style score:
+EmpiricalPayoff(e) =¯ge +c
+r
+logN
+ne +1 ,(8)
+where ne is the number of times e has been selected as the
+anchor, N is the total number of anchor selections so far, and
+c>0 controls the strength of the bonus [9, 36].
+We define ¯ge as the average normalized graph growth ob-
+served when selectinge:
+¯ge = 1
+max(1,n e) ∑
+i∈I(e)
+ ∆Ei
+∆Emax +ε + ∆Ri
+∆Rmax +ε
+
+,(9)
+where I(e) is the set of rounds in whiche served as the anchor,
+and ∆Ei and ∆Ri are the numbers of newly added entities and
+relation types in round i after semantic merging. To make
+gains comparable across rounds, we normalize by window
+maxima computed over the most recent tw rounds, denoted by
+Wt, i.e.,∆E max =max j∈Wt ∆E j and∆R max =max j∈Wt ∆R j.
+Graph prior. While theempirical payoffprovides a self-
+contained mechanism for balancing exploitation and statisti-
+cal exploration, it remains blind to the underlying topology
+of the knowledge graph. Therefore, we introduce a comple-
+mentary, structure-aware exploration term: thegraph prior.
+This prior injects topological intelligence into the strategy, di-
+recting it toward graph regions with high discovery potential.
+It is composed of two distinct terms:
+GraphPrior(e) =DegreeScore(e) +AdjScore(e).(10)
+The first term, DegreeScore, promotes exploration in less-
+dense regions. It penalizes highly connected entities, operat-
+ing on the intuition that these “hub” nodes are more likely to
+be information-saturated:
+DegreeScore(e) =1− deg(e)
+maxu∈E deg(u) +ε .(11)
+The second term, AdjScore, directly measures an entity’s
+relational deficit. This deficit quantifies how common a spe-
+cific relation type is among an entity’s peers, given that the
+entity itself lacks that relation. A high AdjScore thus signals
+a significant discovery opportunity, prioritizing entities that
+are most likely to form a new, expected type of connection:
+AdjScore(e) =max
+r∈Rt
+Deficit(e,r),(12)
+7
+where the deficit for a specific relationris defined as:
+Deficit(e,r) =
+
+
+0,ifr∈EdgeType(e),
+1
+|Ee.type| ∑
+u∈Ee.type
+#Edge(u,r),ifr/∈EdgeType(e).
+(13)
+Here, Rt denotes the set of relation types currently in the
+graph Gt, EdgeType(e) is the set of relation types already
+connected to e, and Ee.type is the set of all entities sharing the
+same semantic type ase.
+Entity scoring and sampling. We integrateempirical pay-
+offandgraph priorinto a final composite score using time-
+varying weights:
+Score(e) =α t ·EmpiricalPayoff(e) +β t ·GraphPrior(e),
+(14)
+where αt gradually increases with time step t to favor high-
+confidence anchors in later stages, while βt remains positive
+to maintain structural awareness.
+To mitigate the risk of prematurely converging on a seem-
+ingly optimal path due to noisy gain estimates, we sample the
+anchor entity e∗
+t from a Top-K softmax distribution over the
+candidate scores, enhancing strategic diversity and robustness.
+Relation Selection.Given the sampled anchor e∗
+t , we choose
+a relation by probing its largest local deficit:
+r∗(e∗
+t ) =arg max
+r∈Rt \EdgeType(e∗t )
+Deficit(e∗
+t ,r).(15)
+To focus on meaningfully large gaps, we compare this
+maximum to the global distribution of current deficits,
+DS t =
+
+Deficit(e,r):e∈E t ,r∈R t \EdgeType(e)
+	
+,
+(16)
+and set r∗
+t =r ∗(e∗
+t ) only if it exceeds the 90th percentile of
+DS t; otherwise, we set r∗
+t =∅ to indicate that no single
+relation is a sufficiently promising target.
+Ultimately, the scheduler outputs the pair (e∗
+t ,r ∗
+t ), which
+provides structured guidance to Query Generator (Sec. 6.4).
+Optimization.We keep scheduling scalable by caching entity
+scores and lazily recomputing only affected entries after each
+graph update. When Gt is updated, we invalidate the cache for
+entities whose neighborhoods changed, and we reuse cached
+scores for all other entities. This reduces per-round overhead
+and decouples scheduling cost from the full graph size.
+6.4 Query Generator
+This module addresses the third challenge in the ASCP formu-
+lation:Real-world RAG systems impose practical constraints.
+We cannot directly send a structured anchor Anct to the sys-
+tem, and relying solely on simple templates is not a viable
+solution, as it can easily be flagged by query provenance mech-
+anisms. Therefore, the core task of this module is to translate
+the abstract, strategic anchor pair from the Strategy Scheduler
+into a concrete, executable, and natural-sounding query qt+1.
+Query Generator
+History Queries
+Relation DrivenNeighborhood-based𝑞!"#
+resample
+M timessim>𝜏!"#exit
+𝐴𝑛𝑐$		(𝑒$∗,𝑟$∗)
+Figure 7:Query Generator.Given an anchor pair (e∗
+t ,r ∗
+t ),
+it selects a generation strategy. A candidate query qt+1 is
+produced and checked against historical queries. If redundant,
+it requests a new anchor from the scheduler and resamples.
+This process must address two primary challenges: 1) gen-
+erating a query that is contextually relevant to the anchor’s
+strategic intent, and 2) ensuring the query remains novel to
+avoid redundancy under the limited query budget. To achieve
+this, the generator (Fig. 7) involves the following three steps.
+1) Adaptive Query Formulation.The generator’s first step
+is to intelligently select a formulation strategy based on the
+specificity of the anchor (e∗
+t ,r ∗
+t ) provided by the scheduler.
+This dual-mode approach allows the system to flexibly switch
+between precision and discovery:
+• Relation-Driven Probing. When the Strategy Scheduler
+identifies a plausible relation deficitr∗
+t for an entity e∗
+t with
+high confidence, the generator activates this targeted strat-
+egy. It instantiates a relation-aware template conditioned on
+the (e∗
+t ,r ∗
+t ) pair and realizes it via an LLM into a fluent, nat-
+ural language query qt+1 designed for precise fact-probing.
+• Neighborhood-based Generation.In the absence of a
+sufficiently salient relation, the generator shifts to an ex-
+ploratory mode. It analyzes the local neighborhood of e∗
+t
+within the current knowledge graph Gt. By leveraging the
+KG’s schema and the generative capabilities of LLM, it
+hypothesizes plausible missing relations and formulates
+one or more exploratory query variants.
+2) History-aware De-duplicationTo maximize the informa-
+tion yield of each query, we introduce a robust quality control
+gate powered by a history-aware resampling loop. Before be-
+ing dispatched, each candidate queryq is compared against the
+historical query log Qhist. If its similarity sim(q,Q hist)≥τ dup ,
+the generator triggers a resample operation, drawing a new
+anchor from the Strategy Scheduler’s Top-K distribution and
+re-attempting the formulation, up toM trials. This mechanism
+is critical for avoiding diminishing returns. If allM trials yield
+near-duplicate queries, we treat the current exploration as sat-
+urated. As a practical fallback, an attacker can either restart a
+seeding step to diversify the query pool [32, 76], or terminate
+early to avoid wasting the remaining query budget.
+3) Penalties and Feedback Loop.We close the loop by feed-
+ing generation outcomes back into scheduling. When a query
+is refused, yields an empty answer, or is rejected as a dupli-
+cate, we apply a strategy-specific penalty to the corresponding
+payoff update so that such anchors become less likely to be
+8
+selected in future rounds. This feedback lets the planner adapt
+away from unproductive regions and toward anchors that reli-
+ably produce new graph growth.
+7 Evaluation
+We conduct comprehensive experiments to answer the follow-
+ing research questions:
+RQ1:How effective is RAGCRAWLERcompared with exist-
+ing attack methods?
+RQ2:How does the retriever in the victim RAG affect stealing
+performance?
+RQ3:How does the attacker-side LLM agent influence steal-
+ing performance?
+RQ4:How robust is the attack against RAG variants employ-
+ing query rewriting or multi-query retrieval?
+RQ5:How do hyperparameters and individual techniques
+affect the effectiveness of RAGCRAWLER?
+7.1 Evaluation Setup
+Dataset.We evaluate on four corpora spanning diverse do-
+mains with varying styles and scales. TREC-COVID and
+SciDocs are from BEIR [73] with 171.3K and 25.6K doc-
+uments, and NFCorpus [13] with 5.4K documents. We ad-
+ditionally include Healthcare-Magic-100k [4] (Healthcare)
+with about 100K patient-provider Q&A samples. Together
+they cover biomedical literature, scientific papers, consumer
+health, and clinical dialogues. For efficiency and fair compar-
+ison, we randomly sample 1,000 de-duplicated documents
+from each corpus to form the victim RAG collection [22, 32].
+We verify that each subset preserves the full-corpus semantic
+distribution using Energy Distance [72] and C2ST [51] (Ap-
+pendix B), and report results with larger victim collections in
+Appendix E.4.
+Generator and Retriever.We employ two retrievers in our
+evaluations: BGE [87] and GTE [44]. For generators, we eval-
+uate four large language models: Llama 3.1 Instruct-8B (de-
+noted as Llama-3-8B) [23], Command-R-7B [3], Microsoft-
+Phi-4 [1], and GPT-4o-mini [61]. These generators cover both
+open-source and proprietary systems and span different model
+families and sizes. Including GPT-4o-mini, which incorpo-
+rates safety guardrails [62], allows us to evaluate whether
+stealing remains feasible under built-in guardrails.
+Attacker-side LLM.We adopt two attacker-side LLMs to
+simulate query generation. In the main experiments, we use
+Doubao-1.5-lite-32K [14] due to its high speed, cost effi-
+ciency, and independence from the RAG’s generator family
+(aligns with the black-box assumption). We also evaluate a
+smaller open-source alternative, Qwen-2.5-7B-Instruct [67],
+to examine transferability between model families and sizes.
+RAG Setting.We consider three victim configurations:
+vanilla RAG, query rewriting, and multi-query retrieval with
+RRF re-ranking (default: 3 query variants per user request).
+We set retrieval depth tok=10 by default and analyze the im-
+pact of k in Sec. 7.6. The retrieved documents are provided to
+the generator as contextual input through a structured system
+prompt. Further details are provided in Appendix F.
+Baselines.We compare RAGCRAWLERagainst two state-
+of-the-art black-box RAG knowledge-base stealing attacks:
+RAGThief [32] and IKEA [76]. RAGThief represents
+continuation-based attack, and IKEA represents keyword-
+based attack. To ensure fair comparison, all attacks use the
+same attacker-side LLM, and we adopt default hyperparame-
+ters from the original papers. Unless otherwise specified, each
+attack is allowed to issue at most 1,000 queries to the victim
+RAG, ensuring consistent query budgets across methods.
+Metrics.We evaluate stealing along four complementary axes:
+exposure breadth, semantic faithfulness of the stolen content,
+query cost to reach target coverage, and whether the extracted
+corpus can support service replication.
+Coverage Rate (CR) measures the fraction of the corpus ex-
+posed through retrieval, matching Eq. 3; refusals are treated
+as empty outcomes as in [32, 76].
+Semantic Fidelity (SF) measures average semantic overlap
+between each document d∈D and the stolen content A,
+where A is the set of answer snippets produced across all
+issued queries, using a fixed encoderE eval(·):
+s(d) =max
+e∈A
+cos
+ 
+Eeval(d),E eval(e)
+
+.(17)
+Target-Coverage Query ComplexityQγ is the minimum num-
+ber ofissuedqueries needed to reach coverage γ (the first t
+such that CR(t)≥γ ). When the target is not reached under a
+cap Qmax, we treat Qγ as right-censored and reportQγ >Q max.
+Reconstruction Fidelity assesses whether the stolen corpus
+supports service replication. We build a surrogate RAG from
+the stolen content and evaluate it on official query annotations
+of TREC-COVID, SciDocs, and NFCorpus, restricted to the
+sampled documents (1,860, 2,181, and 1,991 queries). Health-
+care is excluded due to the lack of official query annotations.
+We report success rate (fraction of non-refusal responses),
+answer similarity (semantic similarity between surrogate and
+victim answers), and ROUGE-L.
+7.2 Effectiveness (RQ1)
+We evaluate the effectiveness of RAGCRAWLERthrough cor-
+pus coverage, semantic fidelity, target-coverage query com-
+plexity, and reconstruction fidelity. Across all evaluations,
+RAGCRAWLERdemonstrates the strongest performance.
+Coverage Rate.Under a fixed 1,000-query budget with the
+BGE retriever, RAGCRAWLERattains the highest final cov-
+erage in every configuration in Table 1. Averaged over all 16
+configurations, RAGCRAWLERexposes 66.8% of the corpus,
+compared with 46.1% for IKEA and 9.6% for RAGThief. The
+margin is largest on harder corpora (TREC-COVID), where
+RAGCRAWLERreaches 49.4% average coverage across gen-
+erators, while IKEA remains at 18.2%. The coverage curves
+9
+Figure 8: Coverage Rate vs. Query Number (1,000 Budget) across datasets and generators (BGE Retriever). RAGCRAWLER
+steadily increases coverage and consistently surpasses both RAGThief and IKEA. Full results are in Fig. 11.
+Table 1: Coverage rate (CR) and semantic fidelity (SF) of
+attacks under a 1,000-query budget (victim retriever: BGE)
+across four datasets and four generators. Abbreviations: Gen
+(Generator), TREC-C (TREC-COVID), Cmd-R (Command-
+R), MS-Phi (Microsoft-Phi-4), 4o-mini (GPT-4o-mini). “N/A”
+indicates undefined semantic fidelity due to zero coverage.
+RAGCRAWLERperforms best in every setting.
+Dataset Gen CR SF
+RAGThief IKEARAGCrawlerRAGThief IKEARAGCrawler
+TREC-C
+Llama 0.131 0.1610.4940.447 0.4950.591Cmd-R 0.154 0.1730.5440.444 0.5250.614MS-Phi 0.121 0.1970.4740.468 0.5470.6194o-mini 0.000 0.1970.465N/A 0.5430.572
+SciDocs
+Llama 0.053 0.5130.6610.264 0.4950.523Cmd-R 0.093 0.5220.7170.295 0.5140.561MS-Phi 0.065 0.5450.7110.324 0.5340.5634o-mini 0.000 0.4210.516N/A 0.4750.492
+NFCorpus
+Llama 0.061 0.5030.7970.451 0.6440.698Cmd-R 0.169 0.5170.8440.467 0.6560.705MS-Phi 0.113 0.5660.8130.487 0.6630.7174o-mini 0.000 0.4930.631N/A 0.6310.653
+Healthcare
+Llama 0.361 0.6870.8070.536 0.5880.618Cmd-R 0.170 0.5920.7660.383 0.5780.582MS-Phi 0.052 0.5880.6540.434 0.5580.5994o-mini 0.000 0.6930.799N/A 0.4900.577
+Average 0.096 0.4610.6680.417 0.5590.605
+in Fig. 8 further indicate that RAGCRAWLERcontinues to
+accrue new documents throughout the process, whereas base-
+lines typically flatten earlier, consistent with diminishing re-
+turns from locally reactive querying.
+RAGCRAWLERalso remains effective under generators
+with built-in guardrails. When the victim generator is GPT-4o-
+mini, RAGThief yields zero coverage across all four corpora,
+while RAGCRAWLERstill reaches 46.5%-79.9% coverage,
+suggesting that benign, policy-compliant probing can sustain
+stealing even when overt jailbreak patterns are blocked.
+Semantic Fidelity.Higher coverage does not come at the ex-
+pense of semantic quality. Across all dataset–generator pairs,
+RAGCRAWLERachieves the highest average SF (0.605), ex-
+ceeding IKEA (0.559) and RAGThief (0.417) in Table 1.
+Target-Coverage Query Complexity.We next evaluate
+query efficiency for reaching high coverage targets. Table 2
+reports Q0.7 under a capQmax =5,000 . RAGCRAWLERis the
+only method that reaches 70% coverage on all datasets within
+Table 2: Target-coverage query complexity to reach 70% cov-
+erage (Q0.7) under a cap Qmax=5,000 (victim: Llama-3-8B
+generator, BGE retriever). Entries marked “>Q max” are right-
+censored, with the achieved coverage shown in parentheses.
+The full sweep of Qγ is reported in Tab. 10. RAGCRAWLER
+reaches high coverage with far fewer queries.
+Dataset RAGThief IKEARAGCrawler
+TREC-COVID>5,000 (29.8%)>5,000 (19.6%)4,040
+SciDocs>5,000 (7.2%)>5,000 (56.0%)1,163
+NFCorpus>5,000 (16.5%)>5,000 (64.0%)595
+Healthcare>5,000 (53.0%) 1,231568
+the cap, requiring 4,040 queries on TREC-COVID and at most
+1,163 queries on the other corpora (595 on NFCorpus and
+568 on Healthcare). IKEA reaches 70% only on Healthcare
+(1,231 queries) and stays below 70% elsewhere even at Qmax,
+while RAGThief never reaches 70%. Relative to the strongest
+baseline per dataset, RAGCRAWLERreduces Q0.7 by 2.17×
+on Healthcare and by at least 1.24 ×, 4.30×, and 8.40× on
+TREC-COVID, SciDocs, and NFCorpus (lower bounds due
+to censoring). This translates to average ≥4.03× reduction
+in monetary cost under linear per-request pricing (e.g., $20
+per 1,000 search requests on Vertex AI Search [27]).
+The full sweep in Tab. 10 highlights the gap. While IKEA
+can be competitive at low targets on easier corpora (e.g.,
+Healthcare Q0.5 =212 vs. 209), it saturates as γ increases and
+fails to reach 90% on any dataset within Qmax. In contrast,
+RAGCRAWLERreaches 90% on SciDocs, NFCorpus, and
+Healthcare with 3,330, 1,753, and 2,434 queries, respectively,
+and attains 72.5% final coverage on TREC-COVID, more
+than doubling the best baseline’s (29.8% for RAGThief).
+Reconstruction Fidelity.To test whether the stolen corpus
+enables service replication, we build surrogate RAG sys-
+tems from each method’s stolen outputs and evaluate them
+on held-out query sets. Table 3 shows that surrogates built
+from RAGCRAWLERachieve substantially higher success
+rates (38.1%-52.6%) and consistently higher answer similar-
+ity and ROUGE-L, with peaks of 0.6992 similarity and 0.2408
+ROUGE-L. Notably, on SciDocs the IKEA-based surrogate
+has a very low success rate (0.0179) despite IKEA reaching
+51.3% coverage under the 1,000-query budget in Table 1, indi-
+10
+Table 3: Reconstruction fidelity of surrogate RAG systems
+built fromstolenknowledge-base content (victim: Llama-3-
+8B generator, BGE retriever). We report success rate (non-
+refusal), answer embedding similarity, and ROUGE-L against
+victim outputs. Best results are inbold. Surrogates built from
+RAGCRAWLER’s stolen corpus match the victim best.
+Dataset Method Success Rate Answer Sim. ROUGE-L
+TREC-COVIDRAGThief 0.1129 0.4920 0.1547IKEA 0.2247 0.4779 0.1730RAGCrawler 0.3839 0.6098 0.2408
+SciDocs RAGThief 0.0486 0.4275 0.1131IKEA 0.0179 0.4829 0.1277RAGCrawler 0.3810 0.5900 0.2285
+NFCorpus RAGThief 0.0447 0.5156 0.1063IKEA 0.4215 0.6064 0.2013RAGCrawler 0.5259 0.6992 0.2334
+cating that partial theft concentrated in a limited region does
+not necessarily translate into functional replication. Over-
+all, the reconstruction results align with the coverage and
+fidelity trends: broader exploration coupled with higher se-
+mantic alignment yields stolen corpora that are materially
+more useful for building a substitute service.
+Takeaway.Across datasets and generators, RAGCRAWLER
+delivers the strongest stealing breadth, semantic fidelity, and
+query efficiency, and the resulting stolen content transfers into
+markedly higher-fidelity surrogate reconstruction.
+7.3 Retriever Sensitivity (RQ2)
+To evaluate the robustness of RAGCRAWLERagainst differ-
+ent retrieval architectures, we evaluated the attack methods
+on victim RAG systems with GTE [44] as retriever.
+Swapping the retriever shifts the attack surface for all
+methods, but RAGCRAWLERremains the most effective ex-
+tractor in terms of coverage. With GTE, RAGCRAWLER
+achieves 76.6% average coverage across datasets, compared
+with 53.9% for IKEA and 28.2% for RAGThief (Table 4). The
+effect of the retriever is not uniform across corpora: relative
+to BGE, RAGCRAWLERgains 27.1 points on TREC-COVID
+(49.4% to 76.5%) and 17.2 points on SciDocs (66.1% to
+83.3%), but drops by 5.9 and 7.9 points on NFCorpus and
+Healthcare, respectively. This variation suggests that retriever
+choice can materially change which parts of a corpus are easy
+to surface, yet RAGCRAWLERconsistently maintains high
+coverage (at least 72.8%) across all four corpora under GTE.
+Semantic fidelity remains broadly stable. Averaged over
+datasets, RAGCRAWLERattains SF 0.597, exceeding IKEA
+(0.571) and RAGThief (0.484). The only exception is Health-
+care, where IKEA achieves marginally higher SF (0.576 vs.
+0.567), indicating that retriever changes can also alter per-
+document alignment quality in specific domains.
+Takeaway.RAGCRAWLERgeneralizes across retrievers:
+changing the victim retriever can affect absolute difficulty
+Table 4: Coverage rate (CR) and semantic fidelity (SF) of
+attacks when the victim usesGTEas retriever (generator:
+Llama-3-8B; 1,000-query budget). Best results are inbold.
+RAGCRAWLERremains dominant.
+Dataset CR SF
+RAGThief IKEARAGCrawlerRAGThief IKEARAGCrawler
+TREC-COVID 0.191 0.3910.7650.453 0.5650.610SciDocs 0.162 0.4720.8330.345 0.4950.539NFCorpus 0.386 0.6220.7380.589 0.6480.671Healthcare 0.388 0.6710.7280.5480.5760.567
+Average 0.282 0.5390.7660.484 0.5710.597
+and the coverage–fidelity balance, but RAGCRAWLERre-
+mains the strongest overall threat, especially in coverage.
+7.4 Agent Sensitivity (RQ3)
+To investigate the influence of the attacker’s LLM agent on
+attack performance, we evaluated the effectiveness with a
+smaller open-source model, Qwen-2.5-7B-Instruct.
+RAGCRAWLERremains effective with a smaller attacker
+model. With Qwen-2.5-7B-Instruct (victim: Llama-3-8B,
+BGE), RAGCRAWLERachieves 71.3% average coverage
+with 0.585 semantic fidelity (Table 5). Compared to the
+Doubao agent under the same victim setting, the per-dataset
+coverage changes are small (within a few percentage points),
+suggesting that the global scheduler and graph state dominate
+the attack trajectory, while the LLM agent primarily executes
+localized, well-specified generation tasks.
+In comparison, the baseline methods remain significantly
+less effective. With the Qwen-2.5-7B-Instruct agent, IKEA
+achieves an average coverage of 48.0%, while RAGThief
+reaches 27.5%. Although RAGThief sees a slight performance
+improvement (likely because the constrained divergent ability
+of smaller model make it less prone to the off-topic drift), it
+still lags far behind RAGCRAWLER.
+Takeaway.Attack effectiveness for RAGCRAWLERis largely
+agent-agnostic, reinforcing that its advantage comes from
+planning and redundancy control rather than relying on a
+high-capability attacker LLM.
+Table 5: Coverage rate (CR) and semantic fidelity (SF) of
+attacks when using Qwen-2.5-7B-Instruct as the attacker-
+side agent (victim: Llama-3-8B generator, BGE retriever;
+1,000-query budget). Best results are inbold. RAGCRAWLER
+remains dominant.
+Dataset CR SF
+RAGThief IKEARAGCrawlerRAGThief IKEARAGCrawler
+TREC-COVID 0.271 0.1830.5420.469 0.4990.570SciDocs 0.099 0.4890.6750.298 0.4870.507NFCorpus 0.314 0.5590.8340.559 0.6460.678Healthcare 0.414 0.6870.7990.549 0.5760.584
+Average 0.275 0.4800.7130.469 0.5520.585
+11
+Table 6: Coverage rate (CR) and semantic fidelity (SF) un-
+der practical RAG variants (victim: Llama-3-8B generator,
+BGE retriever, 1,000-query budget). Best results are inbold.
+RAGCRAWLERremains the strongest attack.
+Query Rewriting
+Dataset CR SF
+RAGThief IKEARAGCrawlerRAGThief IKEARAGCrawler
+TREC-COVID 0.381 0.2410.6010.519 0.5370.591
+SciDocs 0.561 0.5420.7430.442 0.4790.507
+NFCorpus 0.664 0.4890.8540.633 0.6180.687
+Healthcare 0.709 0.5950.7670.556 0.5640.577
+Average 0.579 0.4670.7410.538 0.5500.591
+Multi-query Retrieval
+Dataset CR SF
+RAGThief IKEARAGCrawlerRAGThief IKEARAGCrawler
+TREC-COVID 0.326 0.1890.4740.525 0.5230.581
+SciDocs 0.352 0.5080.6970.364 0.4940.514
+NFCorpus 0.392 0.5400.8490.588 0.6310.692
+Healthcare 0.562 0.6050.7610.569 0.5800.587
+Average 0.408 0.4610.6950.512 0.5570.594
+7.5 Defense Robustness (RQ4)
+To further explore potential defenses, we extend our evalua-
+tion beyond the test against GPT-4o-mini’s built-in guardrails
+(Sec. 7.2) to two practical mechanisms widely adopted by
+RAG: query rewriting and multi-query retrieval.
+Query Rewriting.In this configuration, the victim RAG sys-
+tem employs an LLM to rewrite incoming queries, aiming to
+clarify user intent and neutralize potential adversarial patterns
+before retrieval and generation. RAGCRAWLERexhibits ex-
+ceptional resilience against this defense, maintaining superior
+performance metrics. As detailed in Table 6, RAGCRAWLER
+achieves an average coverage rate of 74.1% and semantic
+fidelity of 0.591. Although intended as a safeguard, the query
+rewriting process is paradoxically exploited by our method
+to enhance theft. By explicitly refining the query’s semantic
+intent, the rewriter enables the retriever to surface a more
+relevant and diverse set of documents than the original input
+would yield. RAGCRAWLER’s adaptive planner capitalizes
+on this context to accelerate corpus exploration; for instance,
+on the NFCorpus dataset, coverage increases from 79.7% to
+85.4% when this defense is active.
+In contrast, baseline methods fail to effectively exploit this
+dynamic. While RAGThief sees its average coverage improve
+to 57.9% and IKEA reaches 46.7%, both remain significantly
+behind RAGCRAWLER. RAGThief benefits incidentally, as
+the rewriting step strips away its obvious adversarial suf-
+fixes; however, lacking a strategic framework to systemati-
+cally capitalize on the enhanced retrieval results, it cannot
+match RAGCRAWLER’s efficiency, underscoring the funda-
+mental limitations of heuristic-based approaches.
+Multi-query Retrieval.We next evaluate against multi-query
+retrieval, which expands each query into several variants
+whose retrieved results are re-ranked and fused, a process that
+Table 7: Coverage rate (CR) with a provided topic prior vs.
+a no-prior attacker (victim: Llama-3-8B generator, BGE re-
+triever). Best results are inbold. RAGCRAWLERremains
+best and shows small sensitivity to topic-prior removal.
+TREC-COVID SciDocs NFCorpus Healthcare
+Method Prior No-prior Prior No-prior Prior No-prior Prior No-prior
+RAGThief 0.131 0.128 0.053 0.040 0.061 0.123 0.361 0.290
+IKEA 0.161 0.391 0.513 0.108 0.503 0.536 0.687 0.705
+RAGCrawler 0.494 0.426 0.661 0.613 0.797 0.825 0.807 0.755
+can influence attack surface. Once again, RAGCRAWLER
+excels, achieving the highest average coverage of 69.5% and
+a semantic fidelity of 0.593 (Table 6). This mechanism pro-
+vides the attacker with a more diverse set of retrieved doc-
+uments from different semantic clusters. The global graph
+in RAGCRAWLERis uniquely positioned to exploit this; it
+integrates this diverse information to build a more compre-
+hensive map of the corpus, thereby generating more effective
+and far-reaching follow-up queries.
+The baseline methods, however, are not equipped to fully
+leverage this enriched context. RAGThief and IKEA attain
+coverage rates of 40.8% and 46.1%, respectively. Their local-
+ized strategies are unable to fully synthesize the information
+from the multiple retrieval results.
+Takeaway.RAGCRAWLERremains highly effective against
+practical RAG defenses. The results demonstrate that defenses
+designed to sanitize inputs or strengthen retrieval can be sub-
+verted by a strategic attacker and may even amplify the steal-
+ing threat, calling for more advanced safeguards.
+7.6 Ablation Study (RQ5)
+We analyze how attacker assumptions, efficiency techniques,
+and victim-side hyperparameters influence RAGCRAWLER’s
+effectiveness. More ablations on modules and hyperparameter
+choices are provided in Appendix E.2.
+Robustness to topic prior.Our main threat model assumes
+a coarse topic phrase [18, 32, 76], which is typically exposed
+by production RAG services. We further evaluate a weaker
+attacker that starts with no topic prior and infers a coarse 3–8
+word topic phrase using a single benign probe query (counted
+toward the budget). Table 7 shows that RAGCRAWLERre-
+mains the best-performing attack in this setting, with only
+modest CR changes relative to the topic-prior setting. Ap-
+pendix D details the one-shot probing procedure and analyzes
+the quality and variability of the inferred topic phrases.
+Score Cache.We quantify the computational benefit of
+caching similarity-score updates inside the strategy sched-
+uler. Figure 9 shows that caching reduces the number of score
+updates from over 1.67 million to about 0.63 million across
+datasets, corresponding to a 62% workload reduction (2.67×
+fewer updates). Because later rounds increasingly revisit over-
+lapping neighborhoods in the evolving graph, the cache bene-
+12
+Figure 9: Score Computations with vs. without Caching.
+Caching reduces the number of similarity score updates by
+∼2.67×on average, greatly improving efficiency.
+fit grows with interaction length, improving practicality for
+larger budgets or larger corpora.
+Victim Retrieval Depth.We vary the victim retrieval depth k
+to study how much per-query context expansion affects attack
+performance. On TREC-COVID, increasing k substantially
+accelerates early coverage growth: within 1,000 queries, cov-
+erage rises from roughly 28% atk=5 to above 60% atk=20
+(Fig. 10). However, the curve exhibits diminishing returns as
+k increases, consistent with additional retrieved documents be-
+ing increasingly redundant with already exposed content. This
+result highlights a security implication of aggressive retrieval:
+larger k increases the amount of unique corpus material that
+can be exposed per user query.
+8 Discussion and Related Work
+Cost Analysis.We separate (i) attacker-side orchestration cost
+(tokens for running RAGCRAWLER) from (ii) victim-side ser-
+vice cost (per-query fees). Tab. 9 shows RAGCRAWLERin-
+curs only $0.33–$0.53 per dataset under Doubao-1.5-lite-32K
+Figure 10: Coverage Rate vs. Query Number for different
+victim depthkon TREC-COVID, Llama-3-8B, BGE.
+pricing, and becomesnear-zerowith open-source models
+(Sec. 7.4) aside from GPU hosting. Victim-side fees scale
+linearly with issued queries (e.g., Q0.7 in Tab. 2). The low
+attacker overhead creates strong economic asymmetry against
+RAG development cost [2], enabling low-cost service piracy.
+Scalability.Although production RAG corpora may contain
+millions of documents, RAGCRAWLERscales because each
+turn extracts a compact typed delta from the single observed
+answer to update the attacker-side KG, keeping per-turn LLM
+cost independent of |D|. The main bottleneck is accumulated-
+state maintenance (semantic merging and score updates),
+which we mitigate with caching and lazy recomputation (62%
+fewer score updates; Fig. 9). For larger budgets, ANN-backed
+deduplication [54, 82] and out-of-core graph and score stor-
+age [5, 81, 86] offer orthogonal engineering extensions.
+Defenses.Our attack highlights the inherent limitations of
+defenses that rely on analyzing queries in isolation (e.g.,
+guardrails or query rewriting). Moreover, when we evalu-
+ate an LLM-based intent detector, it flags only1.07%of the
+attack queries as suspicious. The core challenge is that the
+malicious pattern is an emergent property of the entire inter-
+action sequence, not an attribute of any single query. This
+exposes a critical blind spot in static security models and ar-
+gues for a pivot towards dynamic, behavior-aware defenses.
+Based on this analysis, we believe query provenance anal-
+ysis [29, 41, 42, 55] holds significant promise. Verifying its
+practical effectiveness would be a valuable next step for the
+research community.
+Security Risks in RAG.This paper concentrates on
+knowledge-base stealing attacks against RAG systems [18,
+22, 32, 66, 76]. RAG systems are also susceptible to other
+security risks [59, 74]. Membership Inference Attacks (MIA)
+enable an adversary to determine if a specific document is
+present in the corpus, thereby exposing the existence of sensi-
+tive records [7, 25, 48, 57]. Furthermore, in Corpus Poisoning
+attacks, an adversary injects malicious data into the RAG
+knowledge base [11,16,17,46,49,69,88,89]. Retrieval of this
+corrupted data can manipulate the system’s output, allowing
+the attacker to propagate misinformation or harmful content.
+9 Conclusion
+We investigated knowledge-base stealing in RAG systems,
+a growing threat to the intellectual property of the retrieval
+corpus. We formalized the attacker’s goal asRAG Crawling,
+an instance of ASCP that targets global corpus coverage un-
+der a fixed query budget, and we developed RAGCRAWLER,
+a knowledge graph-guided framework that operationalizes
+this objective in practical black-box settings. Extensive ex-
+periments show that RAGCRAWLERachieves substantially
+higher coverage than prior attacks (up to 84.4% within a
+budget of 1,000 queries) and remains effective under query
+rewriting and multi-query retrieval, highlighting urgent gaps
+in protecting the knowledge assets of RAG deployments.
+13
+References
+[1] Marah Abdin, Jyoti Aneja, Harkirat Behl, Sébastien
+Bubeck, Ronen Eldan, Suriya Gunasekar, Michael Har-
+rison, Russell J Hewett, Mojan Javaheripi, Piero Kauff-
+mann, et al. Phi-4 technical report.arXiv preprint
+arXiv:2412.08905, 2024.
+[2] ADaSci Research. How to evaluate the rag pipeline cost.
+https://adasci.org/how-to-evaluate-the-rag
+-pipeline-cost, 2024. Accessed: 2025-11-11.
+[3] Cohere For AI. C4ai-command-r7b-12-2024. https:
+//huggingface.co/CohereForAI/c4ai-command
+- r7b- 12- 2024, 2024. Open-source large-language
+model.
+[4] Lavita AI. Chatdoctor-healthcaremagic-100k. https:
+//huggingface.co/datasets/lavita/ChatDocto
+r-HealthCareMagic-100k, 2024. Dataset on Hugging
+Face.
+[5] Zhiyuan Ai, Mingxing Zhang, Yongwei Wu, Xuehai
+Qian, Kang Chen, and Weimin Zheng. Squeezing out all
+the value of loaded data: An out-of-core graph process-
+ing system with reduced disk {I/O}. In2017 USENIX
+annual technical conference (USENIX ATC 17), pages
+125–137, 2017.
+[6] Yasmina Al Ghadban, Huiqi Lu, Uday Adavi, Ankita
+Sharma, Sridevi Gara, Neelanjana Das, Bhaskar Ku-
+mar, Renu John, Praveen Devarsetty, and Jane E Hirst.
+Transforming healthcare education: Harnessing large
+language models for frontline health worker capacity
+building using retrieval-augmented generation.medRxiv,
+pages 2023–12, 2023.
+[7] Maya Anderson, Guy Amit, and Abigail Goldsteen. Is
+my data in your retrieval database? membership infer-
+ence attacks against retrieval augmented generation. In
+International Conference on Information Systems Secu-
+rity and Privacy, volume 2, pages 474–485. Science and
+Technology Publications, Lda, 2025.
+[8] Atlassian. Jira | issue & project tracking software |
+atlassian. https://www.atlassian.com/software
+/jira. Accessed: 2026-02-01.
+[9] Peter Auer, Nicolo Cesa-Bianchi, and Paul Fischer.
+Finite-time analysis of the multiarmed bandit problem.
+Machine learning, 47(2):235–256, 2002.
+[10] Alina Beck. Raising the bar for rag excellence: query
+rewriting and new semantic ranker. https://techco
+mmunity.microsoft.com/blog/azure-ai-servi
+cesblog/raising-the-bar-for-rag-excellenc
+e-query-rewriting-and-new-semanticranker/
+4302729/, 2025. Accessed: 2025-11-04.
+[11] Matan Ben-Tov and Mahmood Sharif. Gasliteing the
+retrieval: Exploring vulnerabilities in dense embedding-
+based search.arXiv preprint arXiv:2412.20953, 2024.
+[12] Haonan Bian. Llm-empowered knowledge graph con-
+struction: A survey.arXiv preprint arXiv:2510.20345,
+2025.
+[13] Vera Boteva, Demian Gholipour, Artem Sokolov, and
+Stefan Riezler. A full-text learning to rank dataset for
+medical information retrieval. InEuropean Confer-
+ence on Information Retrieval, pages 716–722. Springer,
+2016.
+[14] ByteDance. Doubao-1.5-lite-32k. h t t p s : / / w w
+w . v o l c e n g i n e . c o m / d o c s / 8 2 3 7 9 / 1 5 5 4 6 7 9,
+2024. Lightweight version of the Doubao-1.5 series
+by ByteDance.
+[15] Nicholas Carlini, Daniel Paleka, Krishnamurthy Dj Dvi-
+jotham, Thomas Steinke, Jonathan Hayase, A Feder
+Cooper, Katherine Lee, Matthew Jagielski, Milad Nasr,
+Arthur Conmy, et al. Stealing part of a production lan-
+guage model.arXiv preprint arXiv:2403.06634, 2024.
+[16] Harsh Chaudhari, Giorgio Severi, John Abascal,
+Matthew Jagielski, Christopher A Choquette-Choo, Mi-
+lad Nasr, Cristina Nita-Rotaru, and Alina Oprea. Phan-
+tom: General trigger attacks on retrieval augmented lan-
+guage generation.arXiv preprint arXiv:2405.20485,
+2024.
+[17] Sukmin Cho, Soyeong Jeong, Jeongyeon Seo, Taeho
+Hwang, and Jong C Park. Typos that broke the rag’s
+back: Genetic attack on rag pipeline by simulating doc-
+uments in the wild via low-level perturbations. InPro-
+ceedings of the 2024 Conference on Empirical Methods
+in Natural Language Processing (EMNLP 2024). Asso-
+ciation for Computational Linguistics, 2024.
+[18] Stav Cohen, Ron Bitton, and Ben Nassi. Unleashing
+worms and extracting data: Escalating the outcome of
+attacks against rag-based inference in scale and severity
+using jailbreaking.arXiv preprint arXiv:2409.08045,
+2024.
+[19] Gordon V Cormack, Charles LA Clarke, and Stefan
+Buettcher. Reciprocal rank fusion outperforms con-
+dorcet and individual rank learning methods. InProceed-
+ings of the 32nd international ACM SIGIR conference
+on Research and development in information retrieval,
+pages 758–759, 2009.
+[20] Shashank Reddy Danda, Xiaoyong Yuan, and Bo Chen.
+Towards stealing deep neural networks on mobile de-
+vices. InInternational Conference on Security and
+Privacy in Communication Systems, pages 495–508.
+Springer, 2021.
+14
+[21] Madhureeta Das, Gaurav Bagwe, Miao Pan, Kaichen
+Yang, Xiaoyong Yuan, and Lan Zhang. Siamese: Steal-
+ing fine-tuned visual foundation models via diversified
+prompting. InProceedings of the Tenth ACM/IEEE
+Symposium on Edge Computing, pages 1–7, 2025.
+[22] Christian Di Maio, Cristian Cosci, Marco Maggini,
+Valentina Poggioni, and Stefano Melacci. Pirates of
+the rag: Adaptively attacking llms to leak knowledge
+bases.arXiv preprint arXiv:2412.18295, 2024.
+[23] Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey,
+Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman,
+Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan,
+et al. The llama 3 herd of models.arXiv e-prints, pages
+arXiv–2407, 2024.
+[24] Darren Edge, Ha Trinh, Newman Cheng, Joshua
+Bradley, Alex Chao, Apurva Mody, Steven Truitt, Dasha
+Metropolitansky, Robert Osazuwa Ness, and Jonathan
+Larson. From local to global: A graph rag ap-
+proach to query-focused summarization.arXiv preprint
+arXiv:2404.16130, 2024.
+[25] Kaiyue Feng, Guangsheng Zhang, Huan Tian, Heng Xu,
+Yanjun Zhang, Tianqing Zhu, Ming Ding, and Bo Liu.
+Ragleak: Membership inference attacks on rag-based
+large language models. InAustralasian Conference
+on Information Security and Privacy, pages 147–166.
+Springer, 2025.
+[26] Daniel Golovin and Andreas Krause. Adaptive submod-
+ularity: Theory and applications in active learning and
+stochastic optimization.Journal of Artificial Intelligence
+Research, 42:427–486, 2011.
+[27] Google Cloud. Vertex ai search pricing. https://cl
+oud.google.com/generative-ai-app-builder/p
+ricing, 2026. Accessed: 2026-01-29.
+[28] Zirui Guo, Lianghao Xia, Yanhua Yu, Tu Ao, and Chao
+Huang. Lightrag: Simple and fast retrieval-augmented
+generation.arXiv preprint arXiv:2410.05779, 2024.
+[29] Xueyuan Han, Thomas Pasquier, Adam Bates, James
+Mickens, and Margo Seltzer. Unicorn: Runtime
+provenance-based detector for advanced persistent
+threats. In27th Annual Network and Distributed System
+Security Symposium, NDSS 2020. The Internet Society,
+2020.
+[30] Xinlei He, Jinyuan Jia, Michael Backes, Neil Zhenqiang
+Gong, and Yang Zhang. Stealing links from graph
+neural networks. In30th USENIX security symposium
+(USENIX security 21), pages 2669–2686, 2021.
+[31] Shaoxiong Ji, Shirui Pan, Erik Cambria, Pekka Martti-
+nen, and Philip S Yu. A survey on knowledge graphs:
+Representation, acquisition, and applications.IEEE
+transactions on neural networks and learning systems,
+33(2):494–514, 2021.
+[32] Changyue Jiang, Xudong Pan, Geng Hong, Chenfu
+Bao, and Min Yang. Rag-thief: Scalable extraction of
+private data from retrieval-augmented generation ap-
+plications with agent-based attacks.arXiv preprint
+arXiv:2411.14110, 2024.
+[33] Mika Juuti, Sebastian Szyller, Samuel Marchal, and
+N Asokan. Prada: protecting against dnn model stealing
+attacks. In2019 IEEE European Symposium on Security
+and Privacy (EuroS&P), pages 512–527. IEEE, 2019.
+[34] Sanjay Kariyappa and Moinuddin K Qureshi. Defending
+against model stealing attacks with adaptive misinfor-
+mation. InProceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 770–
+778, 2020.
+[35] Vladimir Karpukhin, Barlas Oguz, Sewon Min,
+Patrick SH Lewis, Ledell Wu, Sergey Edunov, Danqi
+Chen, and Wen-tau Yih. Dense passage retrieval for
+open-domain question answering. InEMNLP (1), pages
+6769–6781, 2020.
+[36] Emilie Kaufmann, Olivier Cappé, and Aurélien Gariv-
+ier. On bayesian upper confidence bounds for bandit
+problems. InArtificial intelligence and statistics, pages
+592–600. PMLR, 2012.
+[37] Samir Khuller, Anna Moss, and Joseph Seffi Naor. The
+budgeted maximum coverage problem.Information
+processing letters, 70(1):39–45, 1999.
+[38] Andreas Krause and Carlos Guestrin. Near-optimal
+observation selection using submodular functions. In
+AAAI, volume 7, pages 1650–1654, 2007.
+[39] Langchain. Advanced rag techniques. https://lang
+chain-tutorials.com/lessons/rag-applicati
+ons/lesson-14, 2025. Accessed: 2025-11-04.
+[40] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio
+Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich
+Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel,
+et al. Retrieval-augmented generation for knowledge-
+intensive nlp tasks.Advances in neural information
+processing systems, 33:9459–9474, 2020.
+[41] Shaofei Li, Feng Dong, Xusheng Xiao, Haoyu Wang,
+Fei Shao, Jiedong Chen, Yao Guo, Xiangqun Chen, and
+Ding Li. Nodlink: An online system for fine-grained
+apt attack detection and investigation.arXiv preprint
+arXiv:2311.02331, 2023.
+15
+[42] Shaofei Li, Ziqi Zhang, Haomin Jia, Yao Guo, Xiangqun
+Chen, and Ding Li. Query provenance analysis: Effi-
+cient and robust defense against query-based black-box
+attacks. In2025 IEEE Symposium on Security and Pri-
+vacy (SP), pages 1641–1656. IEEE, 2025.
+[43] Yiming Li, Linghui Zhu, Xiaojun Jia, Yong Jiang, Shu-
+Tao Xia, and Xiaochun Cao. Defending against model
+stealing via verifying embedded external features. In
+Proceedings of the AAAI conference on artificial intelli-
+gence, volume 36, pages 1464–1472, 2022.
+[44] Zehan Li, Xin Zhang, Yanzhao Zhang, Dingkun Long,
+Pengjun Xie, and Meishan Zhang. Towards general text
+embeddings with multi-stage contrastive learning.arXiv
+preprint arXiv:2308.03281, 2023.
+[45] Zhicong Li, Jiahao Wang, Zhishu Jiang, Hangyu Mao,
+Zhongxia Chen, Jiazhen Du, Yuanxing Zhang, Fuzheng
+Zhang, Di Zhang, and Yong Liu. Dmqr-rag: Di-
+verse multi-query rewriting for rag.arXiv preprint
+arXiv:2411.13154, 2024.
+[46] Jiacheng Liang, Yuhui Wang, Changjiang Li, Rongyi
+Zhu, Tanqiu Jiang, Neil Gong, and Ting Wang. Graphrag
+under fire.arXiv preprint arXiv:2501.14050, 2025.
+[47] Sheng-Chieh Lin, Jheng-Hong Yang, Rodrigo Nogueira,
+Ming-Feng Tsai, Chuan-Ju Wang, and Jimmy Lin. Con-
+versational question reformulation via sequence-to-
+sequence architectures and pretrained language models.
+arXiv preprint arXiv:2004.01909, 2020.
+[48] Mingrui Liu, Sixiao Zhang, and Cheng Long. Mask-
+based membership inference attacks for retrieval-
+augmented generation. InProceedings of the ACM on
+Web Conference 2025, pages 2894–2907, 2025.
+[49] Yinuo Liu, Zenghui Yuan, Guiyao Tie, Jiawen Shi,
+Pan Zhou, Lichao Sun, and Neil Zhenqiang Gong.
+Poisoned-mrag: Knowledge poisoning attacks to multi-
+modal retrieval augmented generation.arXiv preprint
+arXiv:2503.06254, 2025.
+[50] Yupei Liu, Jinyuan Jia, Hongbin Liu, and Neil Zhen-
+qiang Gong. Stolenencoder: stealing pre-trained en-
+coders in self-supervised learning. InProceedings of
+the 2022 ACM SIGSAC Conference on Computer and
+Communications Security, pages 2115–2128, 2022.
+[51] David Lopez-Paz and Maxime Oquab. Revisiting classi-
+fier two-sample tests.arXiv preprint arXiv:1610.06545,
+2016.
+[52] Lefteris Loukas, Ilias Stogiannidis, Odysseas Diaman-
+topoulos, Prodromos Malakasiotis, and Stavros Vassos.
+Making llms worth every penny: Resource-limited text
+classification in banking. InProceedings of the Fourth
+ACM International Conference on AI in Finance, pages
+392–400, 2023.
+[53] Xinbei Ma, Yeyun Gong, Pengcheng He, Nan Duan, et al.
+Query rewriting in retrieval-augmented large language
+models. InThe 2023 Conference on Empirical Methods
+in Natural Language Processing, 2023.
+[54] Yu A Malkov and Dmitry A Yashunin. Efficient and
+robust approximate nearest neighbor search using hierar-
+chical navigable small world graphs.IEEE transactions
+on pattern analysis and machine intelligence, 42(4):824–
+836, 2018.
+[55] Sadegh M Milajerdi, Rigel Gjomemo, Birhanu Es-
+hete, Ramachandran Sekar, and VN Venkatakrishnan.
+Holmes: real-time apt detection through correlation of
+suspicious information flows. In2019 IEEE symposium
+on security and privacy (SP), pages 1137–1152. IEEE,
+2019.
+[56] Fengran Mo, Kelong Mao, Yutao Zhu, Yihong Wu,
+Kaiyu Huang, and Jian-Yun Nie. Convgqr: Generative
+query reformulation for conversational search.arXiv
+preprint arXiv:2305.15645, 2023.
+[57] Ali Naseh, Yuefeng Peng, Anshuman Suri, Harsh
+Chaudhari, Alina Oprea, and Amir Houmansadr. Rid-
+dle me this! stealthy membership inference for
+retrieval-augmented generation.arXiv preprint
+arXiv:2502.00306, 2025.
+[58] George L Nemhauser, Laurence A Wolsey, and Mar-
+shall L Fisher. An analysis of approximations for max-
+imizing submodular set functions—i.Mathematical
+programming, 14(1):265–294, 1978.
+[59] Bo Ni, Zheyuan Liu, Leyao Wang, Yongjia Lei, Yuy-
+ing Zhao, Xueqi Cheng, Qingkai Zeng, Luna Dong,
+Yinglong Xia, Krishnaram Kenthapadi, et al. To-
+wards trustworthy retrieval augmented generation for
+large language models: A survey.arXiv preprint
+arXiv:2502.06872, 2025.
+[60] Daryna Oliynyk, Rudolf Mayer, and Andreas Rauber. I
+know what you trained last summer: A survey on steal-
+ing machine learning models and defences.ACM Com-
+puting Surveys, 55(14s):1–41, 2023.
+[61] OpenAI. Gpt-4o mini. https://openai.com/ind
+ex/gpt- 4o- mini- advancing- cost- efficient
+-intelligence/ , 2024. A cost-efficient, small-scale
+multimodal model from OpenAI.
+[62] OpenAI. Openai safety update: Sharing our practices as
+part of the ai seoul summit. https://openai.com/i
+ndex/openai-safety-update, May 2024. Accessed:
+2025-11-12.
+16
+[63] Tribhuvanesh Orekondy, Bernt Schiele, and Mario Fritz.
+Knockoff nets: Stealing functionality of black-box mod-
+els. InProceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 4954–
+4963, 2019.
+[64] Tribhuvanesh Orekondy, Bernt Schiele, and Mario
+Fritz. Prediction poisoning: Utility-constrained defenses
+against model stealing attacks. InInternational Confer-
+ence on Representation Learning (ICLR) 2020, 2020.
+[65] Andrea Papaluca, Daniel Krefl, Sergio Rodríguez Mén-
+dez, Artem Lensky, and Hanna Suominen. Zero-and
+few-shots knowledge graph triplet extraction with large
+language models. InProceedings of the 1st workshop on
+knowledge graphs and large language models (kaLLM
+2024), pages 12–23, 2024.
+[66] Zhenting Qi, Hanlin Zhang, Eric P Xing, Sham M
+Kakade, and Himabindu Lakkaraju. Follow my instruc-
+tion and spill the beans: Scalable data extraction from
+retrieval-augmented generation systems. InThe Thir-
+teenth International Conference on Learning Represen-
+tations.
+[67] Qwen. Qwen2.5-7b-instruct. https://huggingface.
+co/Qwen/Qwen2.5-7B-Instruct, 2024. Open-source
+large-language model.
+[68] Adnan Siraj Rakin, Md Hafizul Islam Chowdhuryy, Fan
+Yao, and Deliang Fan. Deepsteal: Advanced model
+extractions leveraging efficient weight stealing in mem-
+ories. In2022 IEEE symposium on security and privacy
+(SP), pages 1157–1174. IEEE, 2022.
+[69] Avital Shafran, Roei Schuster, and Vitaly Shmatikov.
+Machine against the rag: Jamming retrieval-augmented
+generation with blocker documents.USENIX Security,
+2025.
+[70] Yun Shen, Xinlei He, Yufei Han, and Yang Zhang.
+Model stealing attacks against inductive graph neural
+networks. In2022 IEEE Symposium on Security and
+Privacy (SP), pages 1175–1192. IEEE, 2022.
+[71] Gabriel Stanovsky, Julian Michael, Luke Zettlemoyer,
+and Ido Dagan. Supervised open information extraction.
+InProceedings of the 2018 Conference of the North
+American Chapter of the Association for Computational
+Linguistics: Human Language Technologies, Volume 1
+(Long Papers), pages 885–895, 2018.
+[72] Gábor J Székely and Maria L Rizzo. Energy statistics:
+A class of statistics based on distances.Journal of statis-
+tical planning and inference, 143(8):1249–1272, 2013.
+[73] Nandan Thakur, Nils Reimers, Andreas Rücklé, Ab-
+hishek Srivastava, and Iryna Gurevych. Beir: A heteroge-
+nous benchmark for zero-shot evaluation of informa-
+tion retrieval models.arXiv preprint arXiv:2104.08663,
+2021.
+[74] The Lasso Team. Rag security: Risks and mitigation
+strategies, 2024. See section: “Security Risks at Re-
+trieval Stage”. URL: https://www.lasso.security
+/blog/rag-security.
+[75] Florian Tramèr, Fan Zhang, Ari Juels, Michael K Re-
+iter, and Thomas Ristenpart. Stealing machine learning
+models via prediction {APIs}. In25th USENIX secu-
+rity symposium (USENIX Security 16), pages 601–618,
+2016.
+[76] Yuhao Wang, Wenjie Qu, Yanze Jiang, Zichen Liu, Yue
+Liu, Shengfang Zhai, Yinpeng Dong, and Jiaheng Zhang.
+Silent leaks: Implicit knowledge extraction attack on
+rag systems through benign queries.arXiv preprint
+arXiv:2505.15420, 2025.
+[77] Yujing Wang, Hainan Zhang, Liang Pang, Binghui Guo,
+Hongwei Zheng, and Zhiming Zheng. Maferw: Query
+rewriting with multi-aspect feedbacks for retrieval-
+augmented large language models. InProceedings of the
+AAAI Conference on Artificial Intelligence, volume 39,
+pages 25434–25442, 2025.
+[78] Laurence A Wolsey. An analysis of the greedy algorithm
+for the submodular set covering problem.Combinator-
+ica, 2(4):385–393, 1982.
+[79] Dong-Dong Wu, Chilin Fu, Weichang Wu, Wenwen Xia,
+Xiaolu Zhang, Jun Zhou, and Min-Ling Zhang. Efficient
+model stealing defense with noise transition matrix. In
+Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 24305–24315,
+2024.
+[80] Anbang Xu, Tan Yu, Min Du, Pritam Gundecha, Yufan
+Guo, Xinliang Zhu, May Wang, Ping Li, and Xinyun
+Chen. Generative ai and retrieval-augmented genera-
+tion (rag) systems for enterprise. InProceedings of the
+33rd ACM International Conference on Information and
+Knowledge Management, pages 5599–5602, 2024.
+[81] Xianghao Xu, Fang Wang, Hong Jiang, Yongli Cheng,
+Dan Feng, and Yongxuan Zhang. A hybrid update
+strategy for i/o-efficient out-of-core graph processing.
+IEEE Transactions on Parallel and Distributed Systems,
+31(8):1767–1782, 2020.
+[82] Mingyu Yang, Wentao Li, Jiabao Jin, Xiaoyao Zhong,
+Xiangyu Wang, Zhitao Shen, Wei Jia, and Wei Wang.
+17
+Effective and general distance computation for approx-
+imate nearest neighbor search. In2025 IEEE 41st In-
+ternational Conference on Data Engineering (ICDE),
+pages 1098–1110. IEEE, 2025.
+[83] Alexander Yates, Michele Banko, Matthew Broadhead,
+Michael J Cafarella, Oren Etzioni, and Stephen Soder-
+land. Textrunner: open information extraction on the
+web. InProceedings of Human Language Technologies:
+The Annual Conference of the North American Chap-
+ter of the Association for Computational Linguistics
+(NAACL-HLT), pages 25–26, 2007.
+[84] Xiaoyong Yuan, Leah Ding, Lan Zhang, Xiaolin Li, and
+Dapeng Oliver Wu. Es attack: Model stealing against
+deep neural networks without data hurdles.IEEE Trans-
+actions on Emerging Topics in Computational Intelli-
+gence, 6(5):1258–1270, 2022.
+[85] Shenglai Zeng, Jiankun Zhang, Pengfei He, Yiding Liu,
+Yue Xing, Han Xu, Jie Ren, Yi Chang, Shuaiqiang Wang,
+Dawei Yin, et al. The good and the bad: Exploring
+privacy issues in retrieval-augmented generation (rag).
+InACL (Findings), 2024.
+[86] Mingxing Zhang, Yongwei Wu, Youwei Zhuo, Xuehai
+Qian, Chengying Huan, and Kang Chen. Wonderland:
+A novel abstraction-based out-of-core graph processing
+system.ACM SIGPLAN Notices, 53(2):608–621, 2018.
+[87] Peitian Zhang, Shitao Xiao, Zheng Liu, Zhicheng Dou,
+and Jian-Yun Nie. Retrieve anything to augment large
+language models.arXiv preprint arXiv:2310.07554,
+2023.
+[88] Zexuan Zhong, Ziqing Huang, Alexander Wettig, and
+Danqi Chen. Poisoning retrieval corpora by injecting
+adversarial passages.arXiv preprint arXiv:2310.19156,
+2023.
+[89] Wei Zou, Runpeng Geng, Binghui Wang, and Jinyuan
+Jia. {PoisonedRAG}: Knowledge corruption attacks to
+{Retrieval-Augmented} generation of large language
+models. In34th USENIX Security Symposium (USENIX
+Security 25), pages 3827–3844, 2025.
+18
+Appendix
+A Proof of Theorems
+Notation (issued-query set).A retrieval-level partial re-
+alization ψR records the issued queries and their (retrieval)
+outcome sets. We write dom(ψR)⊆Q for the set of queries
+appearing inψ R (i.e., issued so far), and use the shorthand
+S(ψR):=dom(ψ R).
+In particular, the St−1 in Definition 1 is exactly S(ψR
+t−1 ). We
+also define the union of revealed retrieved items inψ R as
+R(ψR):=
+[
+(q,o)∈ψR
+o.
+Lemma A.1 (RAG ⇒ independence of unissued outcomes).
+We consider standard RAG deployment: each query is pro-
+cessed independently, and any internal randomness (e.g.,
+query rewriting sampling or multi-query generation sampling)
+is freshly drawn per query and independent across queries.
+Formally, let Φ= (ξ q)q∈Q where {ξq} are mutually indepen-
+dent, and assume OΦ(q) is determined only by (q,ξ q). Then
+for any retrieval-level partial realization ψR and any query
+q/∈S(ψR), the conditional law ofOΦ(q) is unchanged by con-
+ditioning on ψR. In particular, for any measurable function
+h(·),
+E
+
+h(OΦ(q))|ψ R
+=E[h(O Φ(q))].(18)
+Proof. Under the stateless assumption, ψR depends only on
+{ξq′ :q ′ ∈S(ψ R)} through the realized outcomes of already
+issued queries. For any q/∈S(ψR), ξq is independent of {ξq′ :
+q′ ∈S(ψ R)}, hence independent of the event defining ψR.
+Therefore conditioning on ψR does not change the distribution
+ofξ q nor ofO Φ(q), which yields (18).
+Proof of Theorem 2: Adaptive Monotonicity and Submod-
+ularity in RAG Crawling
+Proof. (Adaptive monotonicity).For any realization Φ and
+any query set A⊆Q , the coverage function satisfies f(A∪
+{q},Φ)≥f(A,Φ) , since adding a query can only enlarge
+the union of retrieved items. By Definition 1, this implies
+∆(q|ψ R
+t−1 )≥0 for any retrieval-level partial realizationψR
+t−1.
+(Adaptive submodularity).Let ψR and ψR′ be retrieval-
+level partial realizations such that ψR′ is an extension of ψR.
+ThenR(ψ R)⊆R(ψ R′), and alsoS(ψ R)⊆S(ψ R′).
+Fix any query q/∈S(ψR′) (i.e., q has not been issued under
+ψR′). Define the shorthand
+R≜R(ψ R),R ′ ≜R(ψ R′
+),Y≜O Φ(q).
+For any realization Φ consistent with ψR′ (hence also con-
+sistent with ψR), the marginal gain of issuing q under ψR
+is
+f
+ 
+S(ψR)∪ {q},Φ
+
+−f
+ 
+S(ψR),Φ
+
+=|Y\R|,(19)
+and similarly under ψR′ it equals |Y\R ′|. Since R⊆R ′, we
+have pointwise diminishing returns for every outcome setY:
+|Y\R| ≥ |Y\R ′|.(20)
+By Definition 1 and (19),
+∆(q|ψ R) =E
+
+|Y\R| |ψ R
+.(21)
+Because q/∈S(ψ R) and the victim RAG is stateless,
+Lemma A.1 applies and yields
+∆(q|ψ R) =E[|Y\R|].(22)
+Similarly,
+∆(q|ψ R′
+) =E
+
+|Y\R ′|
+
+.(23)
+Taking expectation of (20) over the (common) distribution
+of Y gives E[|Y\R|]≥E[|Y\R ′|]. Combining with (22)–(23)
+yields
+∆(q|ψ R)≥∆(q|ψ R′
+),(24)
+which is adaptive submodularity.
+B Sample Distribution Validation
+To ensure that our 1,000-document samples are representative
+of the full corpora, we compare their semantic distributions
+using Energy Distance [72] and the Classifier Two-Sample
+Test (C2ST) [51].
+Energy Distance quantifies the difference between two dis-
+tributions using Euclidean distances, and is well-suited for
+high-dimensional or non-Gaussian data. A smaller energy
+distance with a large permutation test p-value suggests no
+statistically significant difference between the sampled and
+full sets. As shown in Table 8, all four corpora yield low dis-
+tances (around 0.03) and high p-values (>0.5 ), indicating
+strong alignment between samples and full sets. C2ST (Clas-
+sifier Two-Sample Test) reframes distribution comparison as
+a binary classification task . If a classifier cannot distinguish
+between samples and the full corpus (AUC≈0.5 ), the two dis-
+tributions are considered similar. In Table 8, all AUC scores
+fall within the 0.46–0.51 range, reinforcing that no meaning-
+ful distinction can be learned between the subsets and their
+corresponding full corpora.
+Table 8: Semantic distribution similarity between each full
+corpus and its 1,000-document sampled subset, measured
+by Energy Distance (with permutation test p-value) and the
+Classifier Two-Sample Test (C2ST, using AUC). A small
+Energy Distance with a high p-value and an AUC near 0.5
+indicate distributional similarity.
+Corpus Energy Distance (value/p) C2ST (AUC)
+TREC-COVID 0.0349/0.5249 0.4993
+SciDocs 0.0329/0.5781 0.4938
+NFCorpus 0.0281/0.6412 0.5053
+Healthcare 0.0276/0.5947 0.4679
+19
+Table 9: Token usage and estimated cost per corpus for
+KG-Constructor (KG-C) and Query Generator (QG) using
+Doubao-1.5-lite-32k. “InTok” and “OutTok” denote input and
+output token counts. Each attack costs under $1.
+Metric TREC-COVID SciDocs NFCorpus Healthcare
+KG-C InTok (M) 5.561 6.209 5.997 9.094KG-C OutTok (M) 0.724 1.277 1.076 1.373QG InTok (M) 0.847 0.596 0.366 0.783QG OutTok (M) 0.042 0.027 0.017 0.035
+Total Cost ($) 0.333 0.395 0.359 0.533
+C Attacker-side orchestration cost
+We estimate the attacker-side cost of executing
+RAGCRAWLER, i.e., the tokens consumed by the at-
+tacker’s model. As reported in Table 9, RAGCRAWLER
+processes approximately 6–10 million tokens per dataset.
+Based on Doubao-1.5-lite-32K’s API pricing ($0.042 per
+million input tokens and $0.084 per million output tokens),
+this orchestration cost is $0.33–$0.53 per dataset. As shown
+in Sec. 7.4, substituting an open-source model such as
+Qwen-2.5-7B does not degrade performance, making this
+componentvirtually zeroaside from GPU hosting.
+D No-topic-prior attacker via one-shot topic
+probing
+Motivation.In Sec. 4, we assume the attacker knows a coarse
+topic phrase of the target corpus, which is often available from
+product descriptions, onboarding pages, or light interaction
+with the assistant [27, 76]. To be conservative about attacker
+knowledge, we also evaluate a weaker attacker that starts with
+no topic prior; the corresponding CR results are reported in
+Table 7 (main text).
+One-shot topic probing.The attacker first issues a single
+benign probe query to the victim RAG system:
+What domain do you know about?
+Let the victim response be aprobe. The attacker then infers
+a high-level topic phrase from aprobe using an attacker-side
+LLM and the following prompt. The output is restricted to a
+short phrase (3–8 words) to avoid over-specification and keep
+the prior coarse.
+You are given a sentence that is generated
+by a RAG system.
+Infer the high-level domain/topic of the
+RAG system in 3-8 words.
+Return ONLY the topic phrase (no quotes, no
+extra text).
+Sentence: {a_prob}
+Topic:
+The inferred phrase is the only topic signal used in the
+subsequent attack. For RAGCRAWLER, it replaces the pro-
+vided topic input to the Topic-Specific Prior module (Sec. 6.2),
+which induces the lightweight entity/relation schema and then
+proceeds with the same closed-loop crawling. For fair compar-
+ison, we provide the same inferred topic phrase to baselines
+as their input.
+Budget accounting and metrics.We count the probe as one
+issued query, so the remaining crawling budget is reduced by
+one under a fixed total budget. We report Coverage Rate (CR)
+under the same evaluation protocol as Sec. 7.
+Further analysis: inferred-topic noise and robustness.The
+one-shot probe can yield coarse or off-focus topic phrases that
+deviate substantially from the manual topic prior. For example,
+the inferred topic isMedical Research on Impact Factorsfor
+TREC-COVID (manual topic:COVID-19, similarity 0.134)
+andRelationship Marketing & Techfor SciDocs (manual
+topic:Computer Science Research Papers, similarity 0.185).
+Despite such noise, Table 7 shows that RAGCRAWLER
+remains effective and achieves the best CR across datasets,
+with only modest changes relative to the topic-prior setting. In
+contrast, baselines can be more sensitive to topic quality, con-
+sistent with their heavier reliance on the provided topic signal.
+This robustness is expected from RAGCRAWLER’s design:
+the topic prior only bootstraps the initial schema, while the
+attacker-side global state is continuously updated from re-
+trieved documents, allowing subsequent query planning to
+self-correct and prioritize unexplored regions of the corpus.
+E Additional Experiments Results
+E.1 Coverage Rate Curves
+For completeness, we provide all Coverage Rate curves across
+datasets and settings for all experiments in Sec 7.2, Sec. 7.3
+and Sec. 7.4 in Fig. 11, Fig. 12 and Fig. 13.
+E.2 Additional Ablations
+Modules.The effectiveness of RAGCRAWLERstems from
+the synergistic integration of its three architectural modules.
+Without the KG-Constructor, the system loses its global state
+memory, becoming a stateless, reactive loop unable to dis-
+tinguish explored regions, a behavior characteristic of IKEA.
+Without the Strategy Scheduler, the system cannot perform
+UCB-based prioritization; a fallback to random anchor selec-
+tion would mimic IKEA’s keyword-based strategy. Finally,
+without the Query Generator, the scheduler’s strategic plan
+cannot be translated into executable queries, rendering the
+planning moot.
+Hyperparameter Choices.We examine two key hyperpa-
+rameters in RAGCRAWLER: the UCB exploration coefficient
+c used by the Strategy Scheduler for query selection, and the
+similarity threshold τdup used by the Query Generator to filter
+high-similarity queries (thereby controlling early stopping).
+As shown in Fig. 14, a moderate UCB coefficient of c=0.5
+delivers the best performance by balancing exploitation and
+20
+Figure 11: Coverage Rate vs. Query Number (1,000 Budget) across four datasets and four generators.
+Figure 12: Coverage Rate vs. Query Number (1,000 Budget) across four datasets (GTE Retriever, Llama-3-8B generator).
+21
+Figure 13: Coverage Rate vs. Query Number (1,000 Budget) across four datasets with Qwen-2.5-7B-Instruct as attacker LLM
+(BGE Retriever, Llama-3-8B generator).
+Figure 14: Hyperparameter Choices of RAGCRAWLER.
+exploration. Increasing or decreasing c from this value no-
+ticeably degrades performance, underscoring that c=0.5 is
+near-optimal for a proper exploration–exploitation trade-off.
+Similarly, the threshold τdup exhibits a clear sweet spot. Set-
+ting τdup too low often causes premature termination. On the
+other hand, an overly high threshold produces queries that are
+not sufficiently distinct from one another, which limits explo-
+ration efficiency. Our chosen τdup =0.8 navigates between
+these extremes.
+E.3 Additional Target-Coverage Query Com-
+plexity
+Table 10 summarizes the target-coverage query complexity
+Qγ under a fixed cap Qmax =5,000 and the resulting final
+coverage CR(Qmax). A clear pattern is that baseline heuris-
+tics exhibit strongearlygains but saturate quickly, whereas
+RAGCRAWLERcontinues to accrue coverage as the target
+increases. At low targets (50–60%), IKEA can sometimes ap-
+proach RAGCRAWLERon easier corpora (e.g., Healthcare),
+suggesting that shallow, highly retrievable regions can be
+harvested with mostly local signals. However, as γ increases,
+IKEA increasingly plateaus: on three of four datasets it cannot
+reach 70% within the cap, and its remaining gains are domi-
+nated by redundancy. RAGThief is consistently the weakest,
+failing to reach 50% on most corpora and often stalling far
+below the cap coverage achieved by the other methods.
+In contrast, RAGCRAWLERis the only method that reli-
+ably enters the high-coverage regime. It continues to improve
+beyond 80% and even reaches 90% on three datasets within
+Qmax, while no baseline attains 90% under the same budget.
+Table 10: Query complexity for target corpus coverage under
+a budget cap. For each method and dataset, we report Qγ,
+the number of issued queries needed to reach coverage γ∈
+{0.5,0.6,0.7,0.8,0.9} with Qmax =5,000 ; entries marked
+Qγ >Q max indicate the target was not reached within the
+cap. We also report the final coverageCR(Qmax) for all runs.
+RAGCRAWLERconsistently attains the highest CR(Qmax)
+and reaches substantially higher coverage targets with fewer
+queries.
+Dataset MethodQ 0.5 Q0.6 Q0.7 Q0.8 Q0.9 CR(Qmax)
+TREC-COVID
+RAGThief>5000>5000>5000>5000>5000 0.298
+IKEA>5000>5000>5000>5000>5000 0.196
+RAGCRAWLER1107 1972 4040>5000>5000 0.725
+SciDocs
+RAGThief>5000>5000>5000>5000>5000 0.072
+IKEA 493>5000>5000>5000>5000 0.560
+RAGCRAWLER457 776 1163 1784 3330 0.936
+NFCorpus
+RAGThief>5000>5000>5000>5000>5000 0.192
+IKEA 938 3427>5000>5000>5000 0.640
+RAGCRAWLER200 322 595 1011 1753 0.977
+Healthcare
+RAGThief 3537>5000>5000>5000>5000 0.530
+IKEA 212 345 1231 2925>5000 0.825
+RAGCRAWLER209 329 568 983 2434 0.941
+This difference is also reflected in final coverage at Qmax:
+RAGCRAWLERachieves the highest CR(Qmax) on every
+dataset and maintains a large margin over both baselines, with
+the gap widening on harder corpora. TREC-COVID remains
+the most challenging case: although RAGCRAWLERcannot
+reach 80% within the cap, it still sustains steady growth and
+substantially outpaces baselines that plateau below 30%. Over-
+all, the advantage of global state and planning becomes more
+pronounced as the desired coverage rises, precisely where
+local heuristics are most susceptible to redundancy and drift.
+E.4 Larger victim collections
+To further investigate the impact of scale, a complementary
+study was conducted with an expanded configuration of 2,000
+documents and a 5,000-Budget. The coverage rate curves for
+the NFCorpus and Healthcare datasets from this study are
+depicted in Fig. 15.
+22
+Figure 15: Coverage Rate vs. Query Number (5,000 Budget)
+on NFCorpus and Healthcare with GPT-4o-mini as attacker
+LLM (BGE Retriever, Llama-3-8B generator).
+F Prompts for Experimental Stages
+We document the exact prompts used in RAG settings. More
+prompts in our method can be found in our code.
+RAG System Prompt
+You are an assistant for question-answering tasks. Use
+the following pieces of retrieved context to answer
+the question. If you don’t know the answer, say that
+you don’t know.
+Context:[context]
+Query:[query]
+Answer:
+Query Rewriting Prompt in RAG System
+You are a helpful assistant. Your task is to rewrite
+the given user question to clarify the user’s intent
+and remove any adversarial intent. Directly output the
+rewritten question without any other text.
+Original Question:[query]
+Answer:
+Multi-query Prompt in RAG System
+You are a helpful assistant. Your task is to generate 3
+different versions of the given user question to retrieve
+relevant documents from a vector database. By gener-
+ating multiple perspectives on the user question, your
+goal is to help the user overcome some of the limita-
+tions of the distance-based similarity search. Provide
+directly output these alternative questions separated
+by newlines without any other text.
+Original Question:[query]
+Answer:
+23
