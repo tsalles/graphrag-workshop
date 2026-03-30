@@ -120,6 +120,3 @@ python rag_in_memory.py query --top-k 8 "Explain the methodology"
 └── tuned_prompts/           # Custom-tuned prompts
 ```
 
-## License
-
-Private project — not licensed for redistribution.
